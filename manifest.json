@@ -3,7 +3,7 @@
   "short_name": "BinderDex",
   "description": "Privater Kartenbinder mit Wunschliste, Sprachversionen und Marktpreisen.",
   "lang": "de-DE",
-  "start_url": "./",
+  "start_url": "./?v=4.0.0",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",

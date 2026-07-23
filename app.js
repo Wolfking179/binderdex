@@ -1,10 +1,10 @@
 'use strict';
 
 const API_BASE = 'https://api.tcgdex.net/v2';
-const STORAGE_KEY = 'binderdex-data-v3';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v2', 'binderdex-data-v1'];
+const STORAGE_KEY = 'binderdex-data-v4';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '4.0.0';
 const FETCH_TIMEOUT_MS = 12000;
 
 const LANGS = {
@@ -79,7 +79,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 3,
+    version: 4,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -123,6 +123,8 @@ function migrateData(input) {
     }
 
     Object.values(variants).filter(Boolean).forEach((variant) => {
+      variant.pricing = sanitizePricing(variant.pricing);
+      variant.priceUpdated = variant.pricing?.cardmarket?.updated || variant.priceUpdated || null;
       variant.cardmarketSearch = cardmarketSearchTerms(variant);
       if (!variant.cardmarketLink || variant.cardmarketLinkAuto !== false) {
         variant.cardmarketLink = buildCardmarketSearchLink(variant);
@@ -152,11 +154,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 3, collection: migrated, settings };
+  return { version: 4, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 3;
+  state.data.version = 4;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -174,11 +176,58 @@ function escapeHtml(value = '') {
     .replaceAll("'", '&#039;');
 }
 
-function money(value) {
-  if (value === null || value === undefined || value === '') return '–';
+function positivePrice(value) {
+  if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
-  if (!Number.isFinite(number)) return '–';
+  // TCGdex verwendet bei einzelnen nicht verfügbaren Cardmarket-Feldern 0.
+  // Null ist kein echter Marktpreis und darf weder angezeigt noch als vorhandener
+  // Preis gewertet werden.
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function money(value) {
+  const number = positivePrice(value);
+  if (number === null) return '–';
   return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(number);
+}
+
+function sanitizeCardmarketMarket(market) {
+  if (!market || typeof market !== 'object') return null;
+  const cleaned = {};
+  for (const [key, value] of Object.entries(market)) {
+    if (['updated', 'unit', 'url', 'idProduct'].includes(key)) {
+      cleaned[key] = value;
+      continue;
+    }
+    const number = positivePrice(value);
+    if (number !== null) cleaned[key] = number;
+  }
+  return Object.keys(cleaned).length ? cleaned : null;
+}
+
+function sanitizePricing(pricing) {
+  if (!pricing || typeof pricing !== 'object') return null;
+  const cleaned = { ...pricing };
+  cleaned.cardmarket = sanitizeCardmarketMarket(pricing.cardmarket);
+  if (!cleaned.cardmarket) delete cleaned.cardmarket;
+  return Object.keys(cleaned).length ? cleaned : null;
+}
+
+function marketHasPositivePrice(market) {
+  if (!market) return false;
+  return [
+    'trend', 'low', 'avg', 'avg1', 'avg7', 'avg30',
+    'trend-holo', 'low-holo', 'avg-holo', 'avg1-holo', 'avg7-holo', 'avg30-holo',
+  ].some((key) => positivePrice(market[key]) !== null);
+}
+
+function firstPositiveMarketPrice(market, keys) {
+  if (!market) return null;
+  for (const key of keys) {
+    const value = positivePrice(market[key]);
+    if (value !== null) return value;
+  }
+  return null;
 }
 
 function imageUrl(base, quality = 'low', format = 'webp') {
@@ -258,27 +307,44 @@ function variantPrice(item, variant, key = 'trend') {
   const foilPreferred = ['holo', 'reverse'].includes(item.finish);
   const primary = foilPreferred ? `${key}-holo` : key;
   const secondary = foilPreferred ? key : `${key}-holo`;
+  const preferredSuffix = foilPreferred ? '-holo' : '';
+  const alternateSuffix = foilPreferred ? '' : '-holo';
   const fallbackKeys = key === 'trend'
-    ? [primary, secondary, foilPreferred ? 'avg7-holo' : 'avg7', foilPreferred ? 'avg30-holo' : 'avg30', foilPreferred ? 'avg-holo' : 'avg']
+    ? [
+        primary,
+        `avg7${preferredSuffix}`,
+        `avg30${preferredSuffix}`,
+        `avg${preferredSuffix}`,
+        `avg1${preferredSuffix}`,
+        `low${preferredSuffix}`,
+        secondary,
+        `avg7${alternateSuffix}`,
+        `avg30${alternateSuffix}`,
+        `avg${alternateSuffix}`,
+        `avg1${alternateSuffix}`,
+        `low${alternateSuffix}`,
+      ]
     : [primary, secondary];
-  for (const candidate of fallbackKeys) {
-    const value = market[candidate];
-    if (value === null || value === undefined || value === '') continue;
-    const number = Number(value);
-    if (Number.isFinite(number)) return number;
-  }
-  return null;
+  return firstPositiveMarketPrice(market, fallbackKeys);
 }
 
 function hasMarketPrice(variant) {
-  const market = variant?.pricing?.cardmarket;
-  if (!market) return false;
-  return ['trend', 'low', 'avg7', 'avg30', 'trend-holo', 'low-holo', 'avg7-holo', 'avg30-holo']
-    .some((key) => market[key] !== null && market[key] !== undefined && market[key] !== '' && Number.isFinite(Number(market[key])));
+  return marketHasPositivePrice(variant?.pricing?.cardmarket);
+}
+
+function bestPriceVariant(item, preferred = null) {
+  const candidates = [
+    preferred,
+    item?.variants?.[item?.sourceLanguage],
+    item?.variants?.en,
+    item?.variants?.de,
+    item?.variants?.ja,
+  ].filter(Boolean);
+  return candidates.find(hasMarketPrice) || preferred || candidates[0] || null;
 }
 
 function itemValue(item) {
-  const price = variantPrice(item, sourceVariant(item), 'trend');
+  const price = variantPrice(item, bestPriceVariant(item, sourceVariant(item)), 'trend');
   return price === null ? 0 : price * Math.max(1, Number(item.quantity) || 1);
 }
 
@@ -355,6 +421,13 @@ function buildCardmarketWebSearchLink(card, fallbackCard = null) {
 function normalizeCard(card, language, previous = null) {
   const automaticLink = buildCardmarketSearchLink(card);
   const previousManual = previous && previous.cardmarketLinkAuto === false && previous.cardmarketLink;
+  const freshPricing = sanitizePricing(card.pricing);
+  const previousPricing = sanitizePricing(previous?.pricing);
+  // Ein frischer Null-Datensatz darf einen zuvor funktionierenden Preis nicht
+  // überschreiben. Positive neue Werte haben aber immer Vorrang.
+  const pricing = marketHasPositivePrice(freshPricing?.cardmarket)
+    ? freshPricing
+    : (marketHasPositivePrice(previousPricing?.cardmarket) ? previousPricing : freshPricing);
   return {
     language,
     cardId: card.id,
@@ -368,8 +441,8 @@ function normalizeCard(card, language, previous = null) {
     dexId: Array.isArray(card.dexId) ? card.dexId : [],
     hp: card.hp ?? null,
     image: card.image || previous?.image || '',
-    pricing: card.pricing || null,
-    priceUpdated: card.pricing?.cardmarket?.updated || null,
+    pricing,
+    priceUpdated: pricing?.cardmarket?.updated || previous?.priceUpdated || null,
     cardmarketLink: previousManual || automaticLink,
     cardmarketLinkAuto: !previousManual,
     cardmarketSearch: cardmarketSearchTerms(card),
@@ -548,7 +621,9 @@ function wishlistResultsHtml() {
 
 function collectionCardHtml(item) {
   const variant = sourceVariant(item);
-  const trend = variantPrice(item, variant, 'trend');
+  const displayedPriceVariant = bestPriceVariant(item, variant);
+  const trend = variantPrice(item, displayedPriceVariant, 'trend');
+  const usesEnglishPrice = displayedPriceVariant === item.variants?.en && displayedPriceVariant !== variant;
   return `
     <button class="collection-card" data-open-card="${escapeHtml(item.id)}">
       <div class="card-art">
@@ -558,7 +633,7 @@ function collectionCardHtml(item) {
       <div class="card-info">
         <h3>${escapeHtml(item.title || variant?.name || 'Unbenannte Karte')}</h3>
         <p>${escapeHtml(variant?.setName || 'Set unbekannt')} · ${escapeHtml(variant?.setId || '–')} · #${escapeHtml(variant?.localId || '–')}</p>
-        <div class="card-price-row"><strong>${money(trend)}</strong><span>Trend</span></div>
+        <div class="card-price-row"><strong>${money(trend)}</strong><span>${usesEnglishPrice ? 'EN-Referenz' : 'Trend'}</span></div>
       </div>
     </button>
   `;
@@ -913,8 +988,11 @@ async function openSearchPreview(cardId) {
 }
 
 function renderPreviewModal(card) {
-  const market = card.pricing?.cardmarket;
-  const trend = market?.trend ?? market?.['trend-holo'] ?? market?.avg7 ?? market?.['avg7-holo'] ?? null;
+  const market = sanitizeCardmarketMarket(card.pricing?.cardmarket);
+  const trend = firstPositiveMarketPrice(market, [
+    'trend', 'avg7', 'avg30', 'avg', 'avg1', 'low',
+    'trend-holo', 'avg7-holo', 'avg30-holo', 'avg-holo', 'avg1-holo', 'low-holo',
+  ]);
   const attach = state.attachContext;
   modalRoot.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true" aria-label="Karte auswählen">
@@ -1197,8 +1275,8 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Performance-Update mit robuster Bildanzeige, flexibler Set-/Nummernsuche und verbesserten Cardmarket-Fallbacks.</p></div>
-        <span class="version-badge">V3</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Preis-Hotfix: Nullwerte werden verworfen, englische Referenzpreise automatisch repariert und alte Preisfelder neu geladen.</p></div>
+        <span class="version-badge">V4</span>
       </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
@@ -1213,6 +1291,12 @@ function renderSettings() {
           <div class="install-step">Karte kurz halten und auf das gewünschte Fach ziehen.</div>
           <div class="install-step">Für eine andere Seite Karte antippen, blättern und Zielfach antippen.</div>
         </div>
+      </section>
+
+      <section class="settings-card">
+        <h3>Preise reparieren</h3>
+        <p>Lädt fehlende deutsche, japanische und englische Vergleichspreise erneut und verwirft alte Nullwerte.</p>
+        <button class="primary-button full-button" data-repair-prices>Alle Preise neu prüfen</button>
       </section>
 
       <section class="settings-card">
@@ -1242,25 +1326,35 @@ function renderSettings() {
 }
 
 async function refreshItem(item) {
+  const freshCards = new Map();
   const jobs = Object.entries(item.variants || {})
     .filter(([, variant]) => variant?.cardId)
     .map(async ([language, variant]) => {
       const card = await fetchJson(`${API_BASE}/${language}/cards/${encodeURIComponent(variant.cardId)}`, { cache: 'no-store', retries: 1 });
+      freshCards.set(language, card);
       item.variants[language] = normalizeCard(card, language, variant);
       cardCache.set(`${language}:${variant.cardId}`, Promise.resolve(card));
       return language;
     });
 
   const settled = await Promise.allSettled(jobs);
-  const successful = settled.filter((entry) => entry.status === 'fulfilled').length;
+  let successful = settled.filter((entry) => entry.status === 'fulfilled').length;
 
-  if (!item.variants.en && item.sourceLanguage !== 'en') {
+  // Deutsche und japanische Endpunkte können Nullwerte enthalten. Fehlt dort
+  // ein positiver Marktpreis, wird die englische Vergleichsausgabe erneut
+  // gesucht und frisch geladen, auch wenn bereits ein alter EN-Eintrag existiert.
+  if (item.sourceLanguage !== 'en' && !hasMarketPrice(item.variants?.en)) {
     const source = item.variants[item.sourceLanguage];
     if (source?.cardId) {
       try {
-        const sourceCard = await fetchJson(`${API_BASE}/${item.sourceLanguage}/cards/${encodeURIComponent(source.cardId)}`, { cache: 'no-store' });
+        const sourceCard = freshCards.get(item.sourceLanguage)
+          || await fetchJson(`${API_BASE}/${item.sourceLanguage}/cards/${encodeURIComponent(source.cardId)}`, { cache: 'no-store', retries: 1 });
         const english = await findEnglishCounterpart(sourceCard, item.sourceLanguage);
-        if (english) item.variants.en = normalizeCard(english, 'en');
+        if (english) {
+          item.variants.en = normalizeCard(english, 'en', item.variants.en);
+          cardCache.set(`en:${english.id}`, Promise.resolve(english));
+          successful += 1;
+        }
       } catch {
         // Manuelle Auswahl bleibt verfügbar.
       }
@@ -1269,6 +1363,37 @@ async function refreshItem(item) {
 
   if (!successful && jobs.length) throw new Error('Keine Preisdaten konnten aktualisiert werden.');
   return successful;
+}
+
+async function repairMissingPricesOnce() {
+  if (!navigator.onLine || state.data.settings.priceRepairVersion === APP_VERSION) return;
+  const targets = state.data.collection.filter((item) => {
+    const source = sourceVariant(item);
+    const sourceMissing = !hasMarketPrice(source);
+    const englishMissing = item.sourceLanguage !== 'en' && !hasMarketPrice(item.variants?.en);
+    return sourceMissing || englishMissing;
+  });
+
+  if (!targets.length) {
+    state.data.settings.priceRepairVersion = APP_VERSION;
+    saveData();
+    return;
+  }
+
+  toast(`Preisreparatur für ${targets.length} Karte${targets.length === 1 ? '' : 'n'} läuft …`);
+  let refreshed = 0;
+  for (let index = 0; index < targets.length; index += 3) {
+    const batch = targets.slice(index, index + 3);
+    const settled = await Promise.allSettled(batch.map((item) => refreshItem(item)));
+    refreshed += settled.filter((entry) => entry.status === 'fulfilled').length;
+  }
+
+  state.data.settings.priceRepairVersion = APP_VERSION;
+  saveData();
+  render();
+  toast(refreshed
+    ? `Preisreparatur abgeschlossen: ${refreshed} Einträge geprüft.`
+    : 'Keine positiven Marktpreise gefunden. Fehlende Werte werden nun als – angezeigt.');
 }
 
 async function syncAllPrices(list = null) {
@@ -1669,6 +1794,15 @@ main.addEventListener('click', (event) => {
 
   if (target.closest('[data-export-all]')) return exportAll();
   if (target.closest('[data-import-all]')) return importAll();
+  if (target.closest('[data-repair-prices]')) {
+    delete state.data.settings.priceRepairVersion;
+    saveData();
+    toast('Preisreparatur wurde gestartet …');
+    return repairMissingPricesOnce().catch((error) => {
+      console.error(error);
+      toast('Preisreparatur fehlgeschlagen. Prüfe deine Internetverbindung.');
+    });
+  }
   if (target.closest('[data-persist-storage]')) return persistStorage();
   if (target.closest('[data-clear-all]')) {
     if (!confirm('Wirklich alle BinderDex-Daten auf diesem Gerät löschen?')) return;
@@ -1772,3 +1906,6 @@ if ('serviceWorker' in navigator) {
 
 saveData();
 render();
+setTimeout(() => {
+  repairMissingPricesOnce().catch((error) => console.warn('Automatische Preisreparatur fehlgeschlagen.', error));
+}, 900);
