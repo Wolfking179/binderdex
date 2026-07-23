@@ -1,16 +1,18 @@
-const CACHE_VERSION = 'binderdex-v2.0.0';
+const CACHE_VERSION = 'binderdex-v3.0.0';
 const APP_CACHE = `${CACHE_VERSION}-app`;
-const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
+const API_CACHE = `${CACHE_VERSION}-api`;
+const IMAGE_CACHE = `${CACHE_VERSION}-images`;
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
-  './manifest.json',
+  './styles.css?v=3.0.0',
+  './app.js?v=3.0.0',
+  './manifest.json?v=3.0.0',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/icon-512-maskable.png'
+  './icons/icon-512-maskable.png',
+  './icons/card-placeholder.svg'
 ];
 
 self.addEventListener('install', (event) => {
@@ -19,12 +21,11 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) => Promise.all(
-      keys.filter((key) => !key.startsWith(CACHE_VERSION)).map((key) => caches.delete(key))
-    ))
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => !key.startsWith(CACHE_VERSION)).map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('fetch', (event) => {
@@ -33,54 +34,64 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
 
   if (url.hostname === 'api.tcgdex.net') {
-    event.respondWith(networkFirst(request));
+    const isListRequest = url.search || /\/(cards|sets)$/.test(url.pathname);
+    event.respondWith(isListRequest
+      ? staleWhileRevalidate(request, API_CACHE, 180)
+      : networkFirst(request, API_CACHE, 9000));
     return;
   }
 
   if (url.hostname === 'assets.tcgdex.net') {
-    event.respondWith(staleWhileRevalidate(request));
+    event.respondWith(staleWhileRevalidate(request, IMAGE_CACHE, 280));
     return;
   }
 
   if (url.origin === self.location.origin) {
-    event.respondWith(cacheFirst(request));
+    if (request.mode === 'navigate') {
+      event.respondWith(networkFirst(request, APP_CACHE, 4500, './index.html'));
+    } else {
+      event.respondWith(staleWhileRevalidate(request, APP_CACHE, 60));
+    }
   }
 });
 
-async function cacheFirst(request) {
-  const cached = await caches.match(request);
-  if (cached) return cached;
+async function networkFirst(request, cacheName, timeoutMs, fallbackUrl = null) {
+  const cache = await caches.open(cacheName);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(request);
-    if (response.ok) {
-      const cache = await caches.open(RUNTIME_CACHE);
-      cache.put(request, response.clone());
-    }
+    const response = await fetch(request, { signal: controller.signal, cache: 'no-store' });
+    if (response.ok) await cache.put(request, response.clone());
     return response;
-  } catch {
-    return caches.match('./index.html');
-  }
-}
-
-async function networkFirst(request) {
-  const cache = await caches.open(RUNTIME_CACHE);
-  try {
-    const response = await fetch(request);
-    if (response.ok) cache.put(request, response.clone());
-    return response;
-  } catch {
-    const cached = await cache.match(request);
+  } catch (error) {
+    const cached = await cache.match(request, { ignoreSearch: false });
     if (cached) return cached;
-    throw new Error('Offline and no cached response');
+    if (fallbackUrl) {
+      const fallback = await caches.match(fallbackUrl, { ignoreSearch: true });
+      if (fallback) return fallback;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function staleWhileRevalidate(request) {
-  const cache = await caches.open(RUNTIME_CACHE);
+async function staleWhileRevalidate(request, cacheName, maxEntries) {
+  const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
-  const network = fetch(request).then((response) => {
-    if (response.ok) cache.put(request, response.clone());
+  const network = fetch(request).then(async (response) => {
+    if (response.ok) {
+      await cache.put(request, response.clone());
+      trimCache(cacheName, maxEntries);
+    }
     return response;
   }).catch(() => cached);
   return cached || network;
+}
+
+async function trimCache(cacheName, maxEntries) {
+  const cache = await caches.open(cacheName);
+  const keys = await cache.keys();
+  if (keys.length <= maxEntries) return;
+  await Promise.all(keys.slice(0, keys.length - maxEntries).map((key) => cache.delete(key)));
 }

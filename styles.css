@@ -404,3 +404,33 @@ img { display: block; max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
 }
+
+/* BinderDex 3: robuste Bilder, Preisstatus und Link-Fallbacks */
+img.image-failed { object-fit: contain !important; background: rgba(255,255,255,.035); }
+.image-placeholder,
+.preview-image-placeholder,
+.detail-image-placeholder {
+  width: 100%; aspect-ratio: 245 / 337; display: grid; place-items: center;
+  border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.04);
+  border: 1px dashed rgba(255,255,255,.12); font-size: 11px; text-align: center;
+}
+.preview-image-placeholder { width: 116px; }
+.detail-image-placeholder { min-height: 170px; }
+.compact-missing { padding: 14px 10px 5px; border-radius: 14px; background: rgba(255,255,255,.028); }
+.price-fallback-note {
+  margin: 8px 1px 0; padding: 8px 9px; border-radius: 11px;
+  background: rgba(91,169,255,.08); color: #cfe6ff; font-size: 8.8px; line-height: 1.42;
+}
+.smart-link-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
+.smart-link-actions .save-link-button { margin-top: 0; }
+.exact-search-link {
+  min-height: 38px; display: grid; place-items: center; padding: 0 8px; border-radius: 12px;
+  border: 1px solid rgba(91,169,255,.25); background: rgba(91,169,255,.08);
+  color: #cfe6ff; text-decoration: none; text-align: center; font-size: 9px; font-weight: 850;
+}
+@media (max-width: 380px) {
+  .smart-link-actions { grid-template-columns: 1fr; }
+}
+.version-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.version-card p { margin-bottom: 0; }
+.version-badge { flex: 0 0 auto; min-width: 44px; height: 30px; padding: 0 10px; display: grid; place-items: center; border-radius: 999px; background: rgba(255,204,61,.14); color: var(--accent); border: 1px solid rgba(255,204,61,.25); font-size: 11px; font-weight: 900; }

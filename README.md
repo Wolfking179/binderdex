@@ -1,57 +1,111 @@
-# BinderDex 2 – privater 3×3-Kartenbinder
+# BinderDex 3 – Performance- und Suchupdate
 
-BinderDex ist eine kostenlose, installierbare Web-App (PWA) für das iPhone. Die Sammlung bleibt lokal auf dem Gerät und benötigt weder Login noch Server-Datenbank.
+BinderDex ist eine kostenlose, privat nutzbare iPhone-Web-App (PWA) für den eigenen Pokémon-Kartenbinder und die Wunschliste. Die Sammlung, Notizen und manuell gespeicherten Links bleiben lokal auf dem Gerät.
 
-## Neue Funktionen in Version 2
+## Neu in Version 3.0.0
 
-- Echter Binder mit 3×3 Fächern pro Seite
-- Blättern per Wischgeste oder Seitentasten
-- Karten per Finger verschieben und tauschen
-- Alternativ: Karte antippen, Seite wechseln und Zielfach antippen
-- Neue Karten werden nur auf Deutsch oder Japanisch angelegt
-- Englische Vergleichskarte wird nach Möglichkeit automatisch verknüpft
-- Deutsch/Japanisch und Englisch werden gleichzeitig in der Detailansicht verglichen
-- Suche nach Name, Kartennummer und Setkürzel, z. B. `Pikachu 58 base1` oder `Glurak 199 OBF`
-- Cursor bleibt während der automatischen Suche an der richtigen Position
-- Cardmarket-Link wird automatisch als präzise Suche angelegt
-- Jeder Cardmarket-Link kann manuell überschrieben und gespeichert werden
-- Lesbarkeit und Bedienflächen für große iPhones wie das iPhone 15 Pro Max optimiert
-- Bestehende BinderDex-1-Daten werden automatisch übernommen
+### Schnellere Suche
 
-## Preis- und Linkhinweis
+- Die Trefferliste nutzt zunächst die kleinen Kartendaten der TCGdex-Suche.
+- Vollständige Kartendaten werden erst beim Öffnen eines Treffers geladen.
+- Setinformationen und bereits geladene Karten werden zwischengespeichert.
+- Die Suche aktualisiert nur die Trefferliste; das Eingabefeld wird nicht neu aufgebaut und der Cursor springt nicht mehr an den Anfang.
 
-Die Karten- und Cardmarket-Preisdaten kommen über die kostenlose TCGdex-API. TCGdex liefert Marktpreise, aber derzeit nicht für jede Kartenvariante einen garantiert korrekten direkten Cardmarket-Produktlink. BinderDex erzeugt deshalb automatisch einen Cardmarket-Suchlink aus Kartenname, Kartennummer, Set und Sprache. Stimmt das Ergebnis nicht, kann der Link in der Detailansicht manuell ersetzt und gespeichert werden.
+### Setkürzel und Kartennummer in beliebiger Reihenfolge
 
-Bei deutschen Karten lässt sich die englische Ausgabe meistens über dieselbe Karten-ID automatisch finden. Japanische Sets unterscheiden sich teilweise von internationalen Sets; dann kann die englische Vergleichskarte manuell ausgewählt werden.
+Diese Eingaben werden gleich behandelt:
 
-## Kostenlos veröffentlichen und aktualisieren
+- `OBF 199`
+- `199 OBF`
+- `Glurak 199 OBF`
+- `OBF 199 Glurak`
+- `OBF199`
+- `SVP088`
 
-1. Entpacke das ZIP.
-2. Lade **alle Dateien aus dem Ordner** in dein bestehendes öffentliches GitHub-Repository hoch.
-3. Ersetze dabei die alten Dateien `index.html`, `styles.css`, `app.js`, `manifest.json` und `service-worker.js`.
-4. Öffne anschließend deine GitHub-Pages-Adresse auf dem iPhone.
-5. Schließe BinderDex einmal vollständig und öffne es erneut. Der neue Service Worker ersetzt dann die alte Version.
-6. Falls weiterhin die alte Ansicht erscheint: Safari → Einstellungen → Apps → Safari → Erweitert → Website-Daten → nach deiner GitHub-Adresse suchen und nur diesen Eintrag löschen. Danach die Seite erneut öffnen und wieder zum Home-Bildschirm hinzufügen.
+Unterstützt werden außerdem TCGdex-Set-IDs wie `sv03 199`. Häufige internationale Setkürzel von Base Set bis zu aktuellen Scarlet-&-Violet-Sets sind hinterlegt.
+
+### Robustere Kartenbilder
+
+Für jedes Kartenbild probiert BinderDex automatisch mehrere von TCGdex unterstützte Varianten:
+
+1. WebP in der gewünschten Auflösung
+2. PNG in der gewünschten Auflösung
+3. WebP in der alternativen Auflösung
+4. PNG in der alternativen Auflösung
+5. lokaler Karten-Platzhalter
+
+Bilder und API-Antworten werden durch den Service Worker begrenzt zwischengespeichert, damit bereits geladene Karten schneller erneut erscheinen.
+
+### Ehrlichere und robustere Preise
+
+- Fehlende Preiswerte werden als `–` beziehungsweise „Kein Marktpreis verfügbar“ angezeigt, nicht mehr fälschlich als `0,00 €`.
+- Normal-, Holo- und Reverse-Holo-Auswahl wird bei der Preisermittlung berücksichtigt.
+- Falls für die deutsche oder japanische Ausgabe kein Marktpreis vorliegt, kann der verknüpfte englische Preis deutlich gekennzeichnet als Referenzwert angezeigt werden.
+- Beim Aktualisieren verhindert ein einzelner fehlerhafter Datensatz nicht mehr die Aktualisierung aller anderen Sprachversionen.
+
+### Verbesserte Cardmarket-Links
+
+Cardmarket findet eine Karte über den Namen meist zuverlässiger als über eine reine Kombination aus Setkürzel und Nummer. Deshalb:
+
+- Die normale automatische Cardmarket-Schaltfläche verwendet den Kartennamen.
+- Bei japanischen Karten wird nach Möglichkeit der Name der verknüpften englischen Karte verwendet.
+- „Exakten Treffer suchen“ verwendet zusätzlich Kartenname, Setname, Setkürzel und Kartennummer für eine gezielte Suche nach einer Cardmarket-Produktseite.
+- Ein gefundener direkter Produktlink kann weiterhin manuell eingetragen und dauerhaft gespeichert werden.
+- Manuell gespeicherte Links werden bei Updates nicht überschrieben.
+
+Ein garantiert korrekter Direktlink lässt sich nicht aus jedem TCGdex-Datensatz berechnen, weil nicht für jede Karte eine stabile Cardmarket-Produkt-ID oder direkte URL bereitsteht und Cardmarket-Produktpfade zusätzliche Variantenkennzeichen enthalten können.
+
+## Bestehende Daten
+
+BinderDex 3 übernimmt automatisch Daten aus:
+
+- `binderdex-data-v2`
+- `binderdex-data-v1`
+
+Vor dem Update trotzdem unter **Mehr → Datensicherung → Exportieren** eine Sicherung erstellen.
+
+## Update auf GitHub Pages
+
+1. Dieses ZIP entpacken.
+2. Im bestehenden GitHub-Repository **Add file → Upload files** öffnen.
+3. Den **Inhalt** des entpackten Ordners hochladen, nicht den übergeordneten Ordner.
+4. Vorhandene Dateien ersetzen:
+   - `index.html`
+   - `app.js`
+   - `styles.css`
+   - `manifest.json`
+   - `service-worker.js`
+   - `README.md`
+   - Ordner `icons`
+5. **Commit changes** wählen.
+6. Nach erfolgreichem GitHub-Pages-Deployment die Seite einmal mit `?v=3` öffnen, beispielsweise:
+   `https://BENUTZERNAME.github.io/binderdex/?v=3`
+7. In BinderDex unter **Mehr** prüfen, ob **BinderDex 3.0.0** angezeigt wird.
+
+Falls weiterhin eine ältere Version erscheint:
+
+1. BinderDex vom Home-Bildschirm entfernen.
+2. Auf dem iPhone **Einstellungen → Apps → Safari → Erweitert → Website-Daten** öffnen.
+3. Nur den Eintrag der eigenen GitHub-Pages-Adresse löschen.
+4. Die Adresse in Safari erneut öffnen und wieder **Zum Home-Bildschirm** hinzufügen.
+
+Achtung: Das Löschen der Website-Daten entfernt auch lokal gespeicherte BinderDex-Daten. Deshalb vorher exportieren.
 
 ## Installation auf dem iPhone
 
-1. Veröffentlichte GitHub-Pages-Adresse in Safari öffnen.
+1. GitHub-Pages-Adresse in Safari öffnen.
 2. Teilen-Symbol antippen.
 3. **Zum Home-Bildschirm** auswählen.
 4. **Als Web-App öffnen** aktivieren.
 5. **Hinzufügen** antippen.
 
-## Datensicherung
-
-Die Sammlung liegt in `localStorage`. Unter **Mehr → Datensicherung → Exportieren** lässt sich eine JSON-Datei sichern. Vor größeren Updates empfiehlt sich immer ein Export.
-
 ## Projektdateien
 
-- `index.html` – Grundstruktur
-- `styles.css` – 3×3-Binder und iPhone-Oberfläche
-- `app.js` – Suche, Sprachvergleich, Kartenverschiebung, Preise und Datensicherung
+- `index.html` – App-Grundstruktur
+- `styles.css` – iPhone-Oberfläche und 3×3-Binder
+- `app.js` – Suche, Bilder, Preise, Cardmarket-Links und lokale Daten
 - `manifest.json` – Installationsinformationen
-- `service-worker.js` – Offline-Cache und Update-Version
-- `icons/` – App-Symbole
+- `service-worker.js` – Offline-, Bild- und API-Cache
+- `icons/` – App-Symbole und lokaler Karten-Platzhalter
 
-BinderDex ist ein inoffizielles privates Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company oder Cardmarket.
+BinderDex ist ein inoffizielles privates Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company, TCGdex oder Cardmarket.

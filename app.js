@@ -1,9 +1,11 @@
 'use strict';
 
 const API_BASE = 'https://api.tcgdex.net/v2';
-const STORAGE_KEY = 'binderdex-data-v2';
-const LEGACY_STORAGE_KEY = 'binderdex-data-v1';
+const STORAGE_KEY = 'binderdex-data-v3';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
+const APP_VERSION = '3.0.0';
+const FETCH_TIMEOUT_MS = 12000;
 
 const LANGS = {
   de: { label: 'Deutsch', short: 'DE' },
@@ -24,7 +26,14 @@ const SET_ALIASES = {
   SVP: 'svp', SVI: 'sv01', PAL: 'sv02', OBF: 'sv03', MEW: 'sv03.5',
   PAR: 'sv04', PAF: 'sv04.5', TEF: 'sv05', TWM: 'sv06', SFA: 'sv06.5',
   SCR: 'sv07', SSP: 'sv08', PRE: 'sv08.5', JTG: 'sv09', DRI: 'sv10',
+  BLK: 'sv10.5b', WHT: 'sv10.5w',
 };
+
+const AMBIGUOUS_SET_CODES = new Set(['MEW']);
+const CARDMARKET_SET_CODES = Object.freeze(Object.entries(SET_ALIASES).reduce((map, [code, setId]) => {
+  if (!map[setId]) map[setId] = code;
+  return map;
+}, {}));
 
 const main = document.getElementById('mainContent');
 const modalRoot = document.getElementById('modalRoot');
@@ -55,6 +64,7 @@ let searchRequestId = 0;
 let suppressClickUntil = 0;
 let swipeStart = null;
 const cardCache = new Map();
+const setIndexCache = new Map();
 const dragState = {
   timer: null,
   pointerId: null,
@@ -69,7 +79,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 2,
+    version: 3,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -79,7 +89,7 @@ function defaultData() {
 
 function loadData() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || LEGACY_STORAGE_KEYS.map((key) => localStorage.getItem(key)).find(Boolean);
     if (!raw) return defaultData();
     return migrateData(JSON.parse(raw));
   } catch (error) {
@@ -113,8 +123,9 @@ function migrateData(input) {
     }
 
     Object.values(variants).filter(Boolean).forEach((variant) => {
-      if (!variant.cardmarketLink) {
-        variant.cardmarketLink = buildCardmarketSearchLink(variant, variant.language || firstLanguage);
+      variant.cardmarketSearch = cardmarketSearchTerms(variant);
+      if (!variant.cardmarketLink || variant.cardmarketLinkAuto !== false) {
+        variant.cardmarketLink = buildCardmarketSearchLink(variant);
         variant.cardmarketLinkAuto = true;
       }
     });
@@ -141,11 +152,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 2, collection: migrated, settings };
+  return { version: 3, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 2;
+  state.data.version = 3;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -164,20 +175,49 @@ function escapeHtml(value = '') {
 }
 
 function money(value) {
+  if (value === null || value === undefined || value === '') return '–';
   const number = Number(value);
   if (!Number.isFinite(number)) return '–';
   return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(number);
 }
 
-function imageUrl(base, quality = 'low') {
+function imageUrl(base, quality = 'low', format = 'webp') {
   if (!base) return '';
-  if (/\.(webp|png|jpe?g)$/i.test(base)) return base;
-  return `${base}/${quality}.webp`;
+  if (/\.(webp|png|jpe?g)(?:\?.*)?$/i.test(base)) return base;
+  return `${base}/${quality}.${format}`;
+}
+
+function imageCandidates(base, quality = 'low') {
+  if (!base) return [];
+  if (/\.(webp|png|jpe?g)(?:\?.*)?$/i.test(base)) return [base];
+  const otherQuality = quality === 'high' ? 'low' : 'high';
+  return [
+    imageUrl(base, quality, 'webp'),
+    imageUrl(base, quality, 'png'),
+    imageUrl(base, otherQuality, 'webp'),
+    imageUrl(base, otherQuality, 'png'),
+  ];
+}
+
+function cardImageHtml(base, alt, options = {}) {
+  const candidates = imageCandidates(base, options.quality || 'low');
+  if (!candidates.length) return options.placeholder || '<div class="image-placeholder">Kein Bild</div>';
+  const loading = options.eager ? 'eager' : 'lazy';
+  const priority = options.eager ? 'high' : 'low';
+  const className = options.className ? ` class="${escapeHtml(options.className)}"` : '';
+  const draggable = options.draggable === false ? ' draggable="false"' : '';
+  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async"${draggable} />`;
 }
 
 function formatDate(value) {
   if (!value) return 'unbekannt';
-  const date = new Date(value);
+  let date;
+  if (typeof value === 'number' || /^\d{10,13}$/.test(String(value))) {
+    const numeric = Number(value);
+    date = new Date(numeric < 1e12 ? numeric * 1000 : numeric);
+  } else {
+    date = new Date(value);
+  }
   if (Number.isNaN(date.getTime())) return 'unbekannt';
   return new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(date);
 }
@@ -209,12 +249,32 @@ function sourceVariant(item) {
 }
 
 function priceKey(item, key) {
-  return item.finish === 'holo' ? `${key}-holo` : key;
+  return ['holo', 'reverse'].includes(item.finish) ? `${key}-holo` : key;
 }
 
 function variantPrice(item, variant, key = 'trend') {
-  const value = variant?.pricing?.cardmarket?.[priceKey(item, key)];
-  return Number.isFinite(Number(value)) ? Number(value) : null;
+  const market = variant?.pricing?.cardmarket;
+  if (!market) return null;
+  const foilPreferred = ['holo', 'reverse'].includes(item.finish);
+  const primary = foilPreferred ? `${key}-holo` : key;
+  const secondary = foilPreferred ? key : `${key}-holo`;
+  const fallbackKeys = key === 'trend'
+    ? [primary, secondary, foilPreferred ? 'avg7-holo' : 'avg7', foilPreferred ? 'avg30-holo' : 'avg30', foilPreferred ? 'avg-holo' : 'avg']
+    : [primary, secondary];
+  for (const candidate of fallbackKeys) {
+    const value = market[candidate];
+    if (value === null || value === undefined || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function hasMarketPrice(variant) {
+  const market = variant?.pricing?.cardmarket;
+  if (!market) return false;
+  return ['trend', 'low', 'avg7', 'avg30', 'trend-holo', 'low-holo', 'avg7-holo', 'avg30-holo']
+    .some((key) => market[key] !== null && market[key] !== undefined && market[key] !== '' && Number.isFinite(Number(market[key])));
 }
 
 function itemValue(item) {
@@ -247,31 +307,72 @@ function binderPageCount() {
   return Math.floor(maxSlot / PAGE_SIZE) + 1 + (occupiedOnLastPage >= PAGE_SIZE ? 1 : 0);
 }
 
-function buildCardmarketSearchLink(card, language = 'de') {
-  const direct = card?.cardmarketLink || card?.pricing?.cardmarket?.url;
+function cardmarketSetCode(card) {
+  const setId = String(card?.set?.id || card?.setId || '').trim();
+  const onlineCode = String(card?.set?.tcgOnline || card?.tcgOnline || '').trim();
+  if (onlineCode) return onlineCode.toUpperCase();
+  if (CARDMARKET_SET_CODES[setId]) return CARDMARKET_SET_CODES[setId];
+  return setId;
+}
+
+function cardmarketSearchTerms(card) {
+  const code = cardmarketSetCode(card);
+  const number = String(card?.localId || '').split('/')[0].trim();
+  if (code && number) return `${code} ${number}`;
+  if (card?.name && number) return `${card.name} ${number}`;
+  return String(card?.name || code || number || '').trim();
+}
+
+function cardmarketPreferredName(card, fallbackCard = null) {
+  // Cardmarket findet Namen deutlich zuverlässiger als Kombinationen aus Kürzel
+  // und Kartennummer. Bei japanischen Karten ist der verknüpfte englische Name
+  // in der Regel der beste Suchbegriff.
+  return String(fallbackCard?.name || card?.name || '').trim();
+}
+
+function buildCardmarketSearchLink(card, fallbackCard = null) {
+  const direct = card?.pricing?.cardmarket?.url || card?.cardmarketDirectUrl;
   if (direct) return direct;
-  const languageLabel = LANGS[language]?.label || '';
-  const search = [card?.name, card?.localId, card?.set?.name || card?.setName, card?.set?.id || card?.setId, languageLabel]
-    .filter(Boolean)
-    .join(' ');
+  const broadName = cardmarketPreferredName(card, fallbackCard);
+  const search = broadName || cardmarketSearchTerms(card);
+  if (!search) return 'https://www.cardmarket.com/de/Pokemon/Products/Singles';
   return `https://www.cardmarket.com/de/Pokemon/Products/Search?searchString=${encodeURIComponent(search)}`;
 }
 
+function buildCardmarketWebSearchLink(card, fallbackCard = null) {
+  const code = cardmarketSetCode(card);
+  const number = String(card?.localId || '').split('/')[0].trim();
+  const name = cardmarketPreferredName(card, fallbackCard);
+  const setName = String(card?.setName || card?.set?.name || '').trim();
+  const exact = [
+    name ? `"${name}"` : '',
+    code && number ? `"${code} ${number}"` : '',
+    setName ? `"${setName}"` : '',
+  ].filter(Boolean).join(' ');
+  return `https://www.google.com/search?q=${encodeURIComponent(`site:cardmarket.com/de/Pokemon/Products/Singles ${exact}`)}`;
+}
+
 function normalizeCard(card, language, previous = null) {
-  const automaticLink = buildCardmarketSearchLink(card, language);
+  const automaticLink = buildCardmarketSearchLink(card);
+  const previousManual = previous && previous.cardmarketLinkAuto === false && previous.cardmarketLink;
   return {
     language,
     cardId: card.id,
     name: card.name,
     setId: card.set?.id || card.setId || '',
     setName: card.set?.name || card.setName || 'Unbekanntes Set',
+    tcgOnline: card.set?.tcgOnline || card.tcgOnline || '',
     localId: String(card.localId || ''),
     rarity: card.rarity || '',
-    image: card.image || '',
+    illustrator: card.illustrator || '',
+    dexId: Array.isArray(card.dexId) ? card.dexId : [],
+    hp: card.hp ?? null,
+    image: card.image || previous?.image || '',
     pricing: card.pricing || null,
     priceUpdated: card.pricing?.cardmarket?.updated || null,
-    cardmarketLink: previous?.cardmarketLink || automaticLink,
-    cardmarketLinkAuto: previous ? Boolean(previous.cardmarketLinkAuto) : true,
+    cardmarketLink: previousManual || automaticLink,
+    cardmarketLinkAuto: !previousManual,
+    cardmarketSearch: cardmarketSearchTerms(card),
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -390,7 +491,7 @@ function binderPocketHtml(slot, item) {
     <div class="binder-pocket ${item ? 'filled' : 'empty'} ${selected ? 'selected' : ''}" data-binder-slot="${slot}" data-slot-item="${item?.id || ''}">
       ${item ? `
         <div class="binder-card" data-binder-card data-item-id="${escapeHtml(item.id)}" role="button" tabindex="0" aria-label="${escapeHtml(item.title)} öffnen">
-          ${variant?.image ? `<img src="${escapeHtml(imageUrl(variant.image, 'low'))}" alt="${escapeHtml(item.title)}" loading="lazy" draggable="false" />` : '<div class="pocket-placeholder">Kein Bild</div>'}
+          ${cardImageHtml(variant?.image, item.title, { quality: 'low', eager: true, draggable: false, placeholder: '<div class="pocket-placeholder">Kein Bild</div>' })}
           <span class="pocket-lang">${escapeHtml(LANGS[sourceCode]?.short || sourceCode.toUpperCase())}</span>
           ${item.quantity > 1 ? `<span class="pocket-qty">×${item.quantity}</span>` : ''}
           ${selected ? '<span class="selected-check">✓</span>' : ''}
@@ -451,7 +552,7 @@ function collectionCardHtml(item) {
   return `
     <button class="collection-card" data-open-card="${escapeHtml(item.id)}">
       <div class="card-art">
-        ${variant?.image ? `<img src="${escapeHtml(imageUrl(variant.image, 'low'))}" alt="${escapeHtml(variant.name)}" loading="lazy" />` : '<div class="placeholder-card">Kein Bild</div>'}
+        ${cardImageHtml(variant?.image, variant?.name, { quality: 'low', placeholder: '<div class="placeholder-card">Kein Bild</div>' })}
         <span class="card-badge">${escapeHtml(LANGS[item.sourceLanguage]?.short || '–')} · ${escapeHtml(item.finish === 'holo' ? 'HOLO' : 'NORMAL')}</span>
       </div>
       <div class="card-info">
@@ -492,7 +593,7 @@ function renderSearch() {
     <div class="toolbar search-toolbar">
       <label class="search-field">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="cardSearchInput" value="${escapeHtml(state.searchQuery)}" placeholder="Name · Nummer · Setkürzel" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" />
+        <input id="cardSearchInput" value="${escapeHtml(state.searchQuery)}" placeholder="Name · Nummer · Setkürzel · Reihenfolge egal" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" />
       </label>
       ${attach ? '<button class="filter-button" data-cancel-attach aria-label="Abbrechen">×</button>' : '<button class="filter-button" data-clear-search aria-label="Suche leeren">×</button>'}
     </div>
@@ -528,12 +629,12 @@ function updateSearchResults() {
 function searchResultsHtml() {
   if (state.searchLoading) return '<div class="loading"><div><div class="spinner"></div>Suche läuft …</div></div>';
   if (state.searchError) return `<section class="empty-state small"><h2>Suche nicht erreichbar</h2><p>${escapeHtml(state.searchError)}</p></section>`;
-  if (!state.searchQuery.trim()) return '<section class="search-start"><div class="search-symbol">⌕</div><h2>Name, Nummer oder Set eingeben</h2><p>Die Treffer zeigen anschließend Setname, Set-ID und Kartennummer.</p></section>';
-  if (!state.searchResults.length) return '<section class="empty-state small"><h2>Keine Karte gefunden</h2><p>Prüfe Kartennummer oder Setkürzel. Du kannst auch zunächst nur nach dem Namen suchen.</p></section>';
+  if (!state.searchQuery.trim()) return '<section class="search-start"><div class="search-symbol">⌕</div><h2>Name, Nummer oder Set eingeben</h2><p>Beispiele: „OBF 199 Glurak“, „199 OBF Glurak“ oder „OBF199“. Die Reihenfolge ist egal.</p></section>';
+  if (!state.searchResults.length) return '<section class="empty-state small"><h2>Keine Karte gefunden</h2><p>Probiere Name, Nummer und Setkürzel in beliebiger Reihenfolge – zum Beispiel „199 OBF Glurak“.</p></section>';
 
   return `<div class="results-list">${state.searchResults.map((card) => `
     <button class="result-card" data-search-result="${escapeHtml(card.id)}">
-      ${card.image ? `<img src="${escapeHtml(imageUrl(card.image, 'low'))}" alt="${escapeHtml(card.name)}" loading="lazy" />` : '<div class="result-placeholder"></div>'}
+      ${cardImageHtml(card.image, card.name, { quality: 'low', placeholder: '<div class="result-placeholder"></div>' })}
       <div>
         <h3>${escapeHtml(card.name)}</h3>
         <p>${escapeHtml(card.set?.name || 'Set unbekannt')}</p>
@@ -545,48 +646,125 @@ function searchResultsHtml() {
 }
 
 function parseCardSearch(query) {
-  const rawTokens = String(query)
+  const tokens = String(query)
     .replace(/[#,;]+/g, ' ')
+    .replace(/\s*[-–—]\s*/g, ' ')
     .split(/\s+/)
     .map((token) => token.trim())
     .filter(Boolean);
 
   let setToken = '';
   let localId = '';
-  const remaining = [];
+  const consumed = new Set();
 
-  for (const token of rawTokens) {
-    const upper = token.toUpperCase();
-    const alias = token === upper ? SET_ALIASES[upper] : null;
-    const looksLikeSet = Boolean(alias)
-      || (/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9.-]{3,12}$/.test(token) && !/^\d/.test(token))
-      || (/^[A-Z]{2,6}$/.test(token) && token === upper && rawTokens.length > 1);
-    const looksLikeNumber = /^\d{1,4}[A-Za-z]{0,3}(?:\/\d{1,4})?$/.test(token)
-      || /^(?:TG|GG|RC|XY|BW|SM|SWSH|SVP|DP|HGSS|PR)\d{1,4}[A-Z]?$/.test(upper);
+  // Cardmarket-ähnliche Eingabe wie OBF199, SVP088 oder OBF-199.
+  tokens.forEach((token, index) => {
+    if (setToken || localId) return;
+    const match = token.match(/^([A-Za-z]{2,8})(\d{1,4}[A-Za-z]?)$/);
+    if (!match) return;
+    const code = match[1].toUpperCase();
+    if (!SET_ALIASES[code]) return;
+    setToken = match[1];
+    localId = match[2];
+    consumed.add(index);
+  });
 
-    if (!localId && looksLikeNumber) {
-      localId = token.split('/')[0];
-    } else if (!setToken && looksLikeSet) {
-      setToken = token;
-    } else {
-      remaining.push(token);
-    }
+  const numberIndexes = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ index }) => !consumed.has(index))
+    .filter(({ token }) => /^\d{1,4}[A-Za-z]{0,3}(?:\/\d{1,4})?$/.test(token)
+      || /^(?:TG|GG|RC|XY|BW|SM|SWSH|SVP|DP|HGSS|PR)\d{1,4}[A-Z]?$/i.test(token));
+
+  if (!localId && numberIndexes.length) {
+    localId = numberIndexes[0].token.split('/')[0];
+    consumed.add(numberIndexes[0].index);
   }
 
-  const setId = setToken ? (SET_ALIASES[setToken.toUpperCase()] || setToken) : '';
-  return {
-    raw: query.trim(),
-    name: remaining.join(' ').trim(),
-    localId,
-    setToken,
-    setId,
-  };
+  const setCandidates = tokens
+    .map((token, index) => ({ token, index, upper: token.toUpperCase() }))
+    .filter(({ index }) => !consumed.has(index))
+    .map((candidate) => {
+      const alias = SET_ALIASES[candidate.upper];
+      const tcgdexId = /^(?:base|gym|neo|ecard|ex|dp|pl|hgss|bw|xy|sm|swsh|sv|cel|pgo|tk|dc)[a-z0-9.]*$/i.test(candidate.token);
+      const shortCode = /^[A-Za-z]{2,6}$/.test(candidate.token) && tokens.length <= 3;
+      let score = 0;
+      if (alias) score += 20;
+      if (tcgdexId) score += 18;
+      if (candidate.token === candidate.upper) score += 8;
+      if (candidate.token === candidate.token.toLowerCase()) score += tokens.length === 2 ? 5 : 2;
+      if (AMBIGUOUS_SET_CODES.has(candidate.upper) && candidate.token !== candidate.upper) score -= 12;
+      if (shortCode) score += 2;
+      return { ...candidate, alias, tcgdexId, score };
+    })
+    .filter((candidate) => candidate.alias || candidate.tcgdexId || (candidate.score >= 8 && Boolean(localId)))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  if (!setToken && setCandidates.length) {
+    setToken = setCandidates[0].token;
+    consumed.add(setCandidates[0].index);
+  }
+
+  const name = tokens.filter((_, index) => !consumed.has(index)).join(' ').trim();
+  const setId = setToken ? (SET_ALIASES[setToken.toUpperCase()] || setToken.toLowerCase()) : '';
+  return { raw: String(query).trim(), name, localId, setToken, setId };
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+async function fetchJson(url, options = {}) {
+  const retries = options.retries ?? 1;
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeout || FETCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+        cache: options.cache || 'default',
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) break;
+      await new Promise((resolve) => setTimeout(resolve, 280 * (attempt + 1)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError;
+}
+
+function setIdFromCardBrief(card) {
+  if (card?.set?.id) return card.set.id;
+  const id = String(card?.id || '');
+  const localId = String(card?.localId || '');
+  const suffix = localId ? `-${localId}` : '';
+  if (suffix && id.endsWith(suffix)) return id.slice(0, -suffix.length);
+  const split = id.lastIndexOf('-');
+  return split > 0 ? id.slice(0, split) : '';
+}
+
+async function getSetIndex(language) {
+  if (setIndexCache.has(language)) return setIndexCache.get(language);
+  const promise = fetchJson(`${API_BASE}/${language}/sets`, { retries: 1 })
+    .then((sets) => new Map((sets || []).map((set) => [set.id, set])))
+    .catch((error) => {
+      setIndexCache.delete(language);
+      throw error;
+    });
+  setIndexCache.set(language, promise);
+  return promise;
+}
+
+async function enrichCardBriefs(cards, language) {
+  let sets = new Map();
+  try { sets = await getSetIndex(language); } catch { /* Setnamen sind optional. */ }
+  return [...new Map((cards || []).map((card) => [card.id, card])).values()].map((card) => {
+    if (card.set?.id) return card;
+    const setId = setIdFromCardBrief(card);
+    const set = sets.get(setId) || { id: setId, name: setId || 'Set unbekannt' };
+    return { ...card, set };
+  });
 }
 
 async function fetchCard(language, cardId) {
@@ -601,12 +779,12 @@ async function fetchCard(language, cardId) {
   return promise;
 }
 
-async function hydrateCards(cards, language, limit = 30) {
+async function hydrateCards(cards, language, limit = 18) {
   const unique = [...new Map((cards || []).map((card) => [card.id, card])).values()].slice(0, limit);
   const results = [];
-  for (let index = 0; index < unique.length; index += 8) {
-    const batch = unique.slice(index, index + 8);
-    const settled = await Promise.allSettled(batch.map((card) => card.set ? Promise.resolve(card) : fetchCard(language, card.id)));
+  for (let index = 0; index < unique.length; index += 5) {
+    const batch = unique.slice(index, index + 5);
+    const settled = await Promise.allSettled(batch.map((card) => card.pricing || card.illustrator ? Promise.resolve(card) : fetchCard(language, card.id)));
     settled.forEach((entry) => {
       if (entry.status === 'fulfilled') results.push(entry.value);
     });
@@ -645,27 +823,20 @@ function cardSearchScore(card, parsed) {
 }
 
 async function searchCards(parsed, language) {
-  const directCandidates = [];
-
   if (parsed.setId && parsed.localId) {
     try {
       const direct = await fetchJson(`${API_BASE}/${language}/sets/${encodeURIComponent(parsed.setId)}/${encodeURIComponent(parsed.localId)}`);
-      if (direct?.id) directCandidates.push(direct);
+      if (direct?.id && cardSearchScore(direct, parsed) > -500) return [direct];
     } catch {
-      // Fallback-Suche folgt darunter.
+      // Danach folgt die breitere Suche.
     }
-  }
-
-  if (directCandidates.length) {
-    const score = cardSearchScore(directCandidates[0], parsed);
-    if (score > -500) return directCandidates;
   }
 
   let briefs = [];
   if (parsed.setId && !parsed.name && !parsed.localId) {
     try {
       const set = await fetchJson(`${API_BASE}/${language}/sets/${encodeURIComponent(parsed.setId)}`);
-      briefs = Array.isArray(set?.cards) ? set.cards : [];
+      briefs = Array.isArray(set?.cards) ? set.cards.map((card) => ({ ...card, set: { id: set.id, name: set.name } })) : [];
     } catch {
       briefs = [];
     }
@@ -676,25 +847,24 @@ async function searchCards(parsed, language) {
     if (parsed.name) params.set('name', parsed.name);
     if (parsed.localId) params.set('localId', parsed.localId);
     params.set('pagination:page', '1');
-    params.set('pagination:itemsPerPage', parsed.name ? '45' : '70');
-    const url = `${API_BASE}/${language}/cards?${params.toString()}`;
-    briefs = await fetchJson(url);
+    params.set('pagination:itemsPerPage', parsed.name ? '60' : '90');
+    briefs = await fetchJson(`${API_BASE}/${language}/cards?${params.toString()}`);
   }
 
-  let hydrated = await hydrateCards(briefs, language, 36);
+  // Der Listen-Endpunkt enthält bereits Bild, Name und Nummer. Nur die Setliste
+  // wird einmalig geladen; damit entfallen bis zu 36 Detailanfragen pro Suche.
+  let enriched = await enrichCardBriefs(briefs, language);
 
-  // Falls Name + Nummer zu eng gefiltert war, einmal breiter nur über den Namen suchen.
-  if (!hydrated.length && parsed.name && parsed.localId) {
-    const params = new URLSearchParams({ name: parsed.name, 'pagination:page': '1', 'pagination:itemsPerPage': '45' });
-    const fallback = await fetchJson(`${API_BASE}/${language}/cards?${params.toString()}`);
-    hydrated = await hydrateCards(fallback, language, 36);
+  if (!enriched.length && parsed.name && parsed.localId) {
+    const params = new URLSearchParams({ name: parsed.name, 'pagination:page': '1', 'pagination:itemsPerPage': '60' });
+    enriched = await enrichCardBriefs(await fetchJson(`${API_BASE}/${language}/cards?${params.toString()}`), language);
   }
 
-  return hydrated
+  return enriched
     .map((card) => ({ card, score: cardSearchScore(card, parsed) }))
     .filter((entry) => entry.score > -500)
     .sort((a, b) => b.score - a.score || String(a.card.name).localeCompare(String(b.card.name), 'de'))
-    .slice(0, 30)
+    .slice(0, 36)
     .map((entry) => entry.card);
 }
 
@@ -744,7 +914,7 @@ async function openSearchPreview(cardId) {
 
 function renderPreviewModal(card) {
   const market = card.pricing?.cardmarket;
-  const trend = market?.trend ?? market?.['trend-holo'] ?? null;
+  const trend = market?.trend ?? market?.['trend-holo'] ?? market?.avg7 ?? market?.['avg7-holo'] ?? null;
   const attach = state.attachContext;
   modalRoot.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true" aria-label="Karte auswählen">
@@ -754,7 +924,7 @@ function renderPreviewModal(card) {
         <button class="icon-button" data-close-modal aria-label="Schließen">×</button>
       </div>
       <div class="preview-layout">
-        ${card.image ? `<img src="${escapeHtml(imageUrl(card.image, 'high'))}" alt="${escapeHtml(card.name)}" />` : '<div></div>'}
+        ${cardImageHtml(card.image, card.name, { quality: 'high', eager: true, placeholder: '<div class="preview-image-placeholder">Kein Bild</div>' })}
         <div>
           <span class="preview-language">${escapeHtml(LANGS[state.searchLang].label)}</span>
           <h3>${escapeHtml(card.name)}</h3>
@@ -788,7 +958,7 @@ async function findEnglishCounterpart(card, sourceLanguage) {
     const sameId = await fetchCard('en', card.id);
     if (sameId?.id) return sameId;
   } catch {
-    // Nicht jedes japanische Produkt besitzt dieselbe internationale ID.
+    // Japanische und internationale Sets haben oft verschiedene IDs.
   }
 
   if (card.set?.id && card.localId) {
@@ -796,7 +966,31 @@ async function findEnglishCounterpart(card, sourceLanguage) {
       const sameSetAndNumber = await fetchJson(`${API_BASE}/en/sets/${encodeURIComponent(card.set.id)}/${encodeURIComponent(card.localId)}`);
       if (sameSetAndNumber?.id) return sameSetAndNumber;
     } catch {
-      // Manuelle Auswahl bleibt möglich.
+      // Ähnlichkeitsabgleich folgt.
+    }
+  }
+
+  // Vorsichtiger Bild-/Metadatenersatz: nur sehr eindeutige Übereinstimmungen
+  // werden automatisch verknüpft. Dadurch entstehen weniger falsche Preise.
+  if (card.localId) {
+    try {
+      const params = new URLSearchParams({ localId: String(card.localId), 'pagination:page': '1', 'pagination:itemsPerPage': '35' });
+      const briefs = await fetchJson(`${API_BASE}/en/cards?${params.toString()}`);
+      const candidates = await hydrateCards(briefs, 'en', 16);
+      const sourceDex = new Set(Array.isArray(card.dexId) ? card.dexId.map(String) : []);
+      const sourceIllustrator = normalizeText(card.illustrator);
+      const scored = candidates.map((candidate) => {
+        let score = 0;
+        if (normalizeNumber(candidate.localId) === normalizeNumber(card.localId)) score += 20;
+        if (sourceIllustrator && normalizeText(candidate.illustrator) === sourceIllustrator) score += 55;
+        if (card.hp && candidate.hp && Number(card.hp) === Number(candidate.hp)) score += 10;
+        if (sourceDex.size && Array.isArray(candidate.dexId) && candidate.dexId.some((id) => sourceDex.has(String(id)))) score += 35;
+        if (normalizeText(candidate.name) === normalizeText(card.name)) score += 25;
+        return { candidate, score };
+      }).sort((a, b) => b.score - a.score);
+      if (scored[0]?.score >= 85 && (!scored[1] || scored[0].score - scored[1].score >= 15)) return scored[0].candidate;
+    } catch {
+      // Manuelle Auswahl bleibt verfügbar.
     }
   }
 
@@ -877,14 +1071,14 @@ function renderDetail() {
 
   main.innerHTML = `
     <section class="detail-hero">
-      <div class="detail-art">${variant?.image ? `<img src="${escapeHtml(imageUrl(variant.image, 'high'))}" alt="${escapeHtml(variant.name)}" />` : ''}</div>
+      <div class="detail-art">${cardImageHtml(variant?.image, variant?.name, { quality: 'high', eager: true, placeholder: '<div class="detail-image-placeholder">Kein Bild</div>' })}</div>
       <div class="detail-main">
         <span class="source-pill">Deine Karte · ${escapeHtml(LANGS[sourceLanguage]?.label || sourceLanguage)}</span>
         <h2>${escapeHtml(item.title || variant?.name || 'Karte')}</h2>
         <p>${escapeHtml(variant?.setName || 'Set unbekannt')} · ${escapeHtml(variant?.setId || '–')} · #${escapeHtml(variant?.localId || '–')}</p>
         <div class="tag-row">
           <span class="tag">${escapeHtml(item.condition || 'NM')}</span>
-          <span class="tag">${escapeHtml(item.finish === 'holo' ? 'Holo' : 'Normal')}</span>
+          <span class="tag">${escapeHtml(item.finish === 'holo' ? 'Holo' : item.finish === 'reverse' ? 'Reverse Holo' : 'Normal')}</span>
           ${variant?.rarity ? `<span class="tag">${escapeHtml(variant.rarity)}</span>` : ''}
         </div>
       </div>
@@ -911,7 +1105,7 @@ function renderDetail() {
       <div class="field-grid">
         <div class="field"><label for="quantity">Menge</label><input id="quantity" data-item-field="quantity" type="number" min="1" inputmode="numeric" value="${escapeHtml(item.quantity)}" /></div>
         <div class="field"><label for="condition">Zustand</label><select id="condition" data-item-field="condition">${['MT','NM','EX','GD','LP','PL','PO'].map((condition) => `<option ${item.condition === condition ? 'selected' : ''}>${condition}</option>`).join('')}</select></div>
-        <div class="field"><label for="finish">Variante</label><select id="finish" data-item-field="finish"><option value="normal" ${item.finish === 'normal' ? 'selected' : ''}>Normal</option><option value="holo" ${item.finish === 'holo' ? 'selected' : ''}>Holo / Foil</option></select></div>
+        <div class="field"><label for="finish">Variante</label><select id="finish" data-item-field="finish"><option value="normal" ${item.finish === 'normal' ? 'selected' : ''}>Normal</option><option value="reverse" ${item.finish === 'reverse' ? 'selected' : ''}>Reverse Holo</option><option value="holo" ${item.finish === 'holo' ? 'selected' : ''}>Holo / Foil</option></select></div>
         <div class="field"><label for="purchasePrice">Kaufpreis (€)</label><input id="purchasePrice" data-item-field="purchasePrice" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(item.purchasePrice)}" placeholder="0,00" /></div>
       </div>
       <div class="field"><label for="itemTitle">Eigener Titel</label><input id="itemTitle" data-item-field="title" value="${escapeHtml(item.title)}" /></div>
@@ -930,23 +1124,32 @@ function renderDetail() {
 function languagePriceCardHtml(item, code, role) {
   const variant = item.variants?.[code];
   if (!variant) {
+    const label = code === 'en' ? 'Englische Karte wählen' : `${LANGS[code].label}e Karte wählen`;
     return `
       <article class="language-price-card missing">
         <div class="language-price-head"><span class="language-flag">${escapeHtml(LANGS[code].short)}</span><div><strong>${escapeHtml(LANGS[code].label)}</strong><small>${escapeHtml(role)}</small></div></div>
         <div class="missing-price">
           <strong>Nicht automatisch gefunden</strong>
-          <p>Wähle die passende englische Ausgabe manuell aus.</p>
-          <button class="primary-button full-button" data-attach-lang="${code}">Englische Karte wählen</button>
+          <p>Wähle die passende Ausgabe manuell aus.</p>
+          <button class="primary-button full-button" data-attach-lang="${code}">${escapeHtml(label)}</button>
         </div>
       </article>
     `;
   }
 
-  const trend = variantPrice(item, variant, 'trend');
-  const low = variantPrice(item, variant, 'low');
-  const avg7 = variantPrice(item, variant, 'avg7');
-  const avg30 = variantPrice(item, variant, 'avg30');
-  const link = variant.cardmarketLink || buildCardmarketSearchLink(variant, code);
+  const englishFallback = code !== 'en' && !hasMarketPrice(variant) && hasMarketPrice(item.variants?.en)
+    ? item.variants.en
+    : null;
+  const priceVariant = englishFallback || variant;
+  const trend = variantPrice(item, priceVariant, 'trend');
+  const low = variantPrice(item, priceVariant, 'low');
+  const avg7 = variantPrice(item, priceVariant, 'avg7');
+  const avg30 = variantPrice(item, priceVariant, 'avg30');
+  const nameFallback = code !== 'en' ? item.variants?.en : null;
+  const automaticLink = buildCardmarketSearchLink(variant, nameFallback);
+  const link = variant.cardmarketLinkAuto === false ? variant.cardmarketLink : automaticLink;
+  const webSearch = buildCardmarketWebSearchLink(variant, nameFallback);
+  const missingPrices = [trend, low, avg7, avg30].every((value) => value === null);
 
   return `
     <article class="language-price-card">
@@ -955,24 +1158,35 @@ function languagePriceCardHtml(item, code, role) {
         <div><strong>${escapeHtml(LANGS[code].label)}</strong><small>${escapeHtml(role)}</small></div>
         ${code === 'en' && item.sourceLanguage !== 'en' ? `<button class="mini-action" data-replace-lang="en">Ändern</button>` : ''}
       </div>
-      <div class="price-main-card">
-        <strong>${money(trend)}</strong>
-        <span>Trendpreis</span>
-      </div>
-      <div class="price-mini-grid">
-        <div><span>Niedrig</span><strong>${money(low)}</strong></div>
-        <div><span>7 Tage</span><strong>${money(avg7)}</strong></div>
-        <div><span>30 Tage</span><strong>${money(avg30)}</strong></div>
-      </div>
-      <p class="price-date">Aktualisiert: ${escapeHtml(formatDate(variant.priceUpdated || variant.fetchedAt))}</p>
-      <label class="link-label" for="cardmarket-${code}">Cardmarket-Link ${variant.cardmarketLinkAuto ? '(automatisch)' : '(manuell)'}</label>
+      ${missingPrices ? `
+        <div class="missing-price compact-missing">
+          <strong>Kein Marktpreis verfügbar</strong>
+          <p>TCGdex liefert für diese Ausgabe derzeit keine Cardmarket-Preisdaten.</p>
+        </div>
+      ` : `
+        <div class="price-main-card">
+          <strong>${money(trend)}</strong>
+          <span>${englishFallback ? 'Englischer Referenzpreis' : 'Trendpreis'}</span>
+        </div>
+        <div class="price-mini-grid">
+          <div><span>Niedrig</span><strong>${money(low)}</strong></div>
+          <div><span>7 Tage</span><strong>${money(avg7)}</strong></div>
+          <div><span>30 Tage</span><strong>${money(avg30)}</strong></div>
+        </div>
+      `}
+      ${englishFallback ? '<p class="price-fallback-note">Für diese Sprachversion fehlen Daten. Angezeigt wird ersatzweise die verknüpfte englische Ausgabe.</p>' : ''}
+      <p class="price-date">Aktualisiert: ${escapeHtml(formatDate(priceVariant.priceUpdated || priceVariant.fetchedAt))}</p>
+      <label class="link-label" for="cardmarket-${code}">Cardmarket-Link ${variant.cardmarketLinkAuto ? `(automatisch: ${escapeHtml(variant.cardmarketSearch || cardmarketSearchTerms(variant))})` : '(manuell)'}</label>
       <div class="link-editor">
         <input id="cardmarket-${code}" data-cardmarket-link="${code}" value="${escapeHtml(link)}" placeholder="Cardmarket-Link" inputmode="url" autocapitalize="off" />
         <button class="link-button" data-open-cardmarket="${code}" ${link ? '' : 'disabled'} aria-label="Cardmarket öffnen">
           <svg viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
         </button>
       </div>
-      <button class="save-link-button" data-save-cardmarket="${code}">Link speichern</button>
+      <div class="smart-link-actions">
+        <button class="save-link-button" data-save-cardmarket="${code}">Link speichern</button>
+        <a class="exact-search-link" href="${escapeHtml(webSearch)}" target="_blank" rel="noopener">Exakten Treffer suchen</a>
+      </div>
     </article>
   `;
 }
@@ -982,6 +1196,10 @@ function renderSettings() {
   main.innerHTML = `
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
+      <section class="settings-card version-card">
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Performance-Update mit robuster Bildanzeige, flexibler Set-/Nummernsuche und verbesserten Cardmarket-Fallbacks.</p></div>
+        <span class="version-badge">V3</span>
+      </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
         <p>Neue Karten können auf Deutsch oder Japanisch angelegt werden. Englisch wird automatisch als Vergleich gesucht.</p>
@@ -1027,16 +1245,20 @@ async function refreshItem(item) {
   const jobs = Object.entries(item.variants || {})
     .filter(([, variant]) => variant?.cardId)
     .map(async ([language, variant]) => {
-      const card = await fetchJson(`${API_BASE}/${language}/cards/${encodeURIComponent(variant.cardId)}`);
+      const card = await fetchJson(`${API_BASE}/${language}/cards/${encodeURIComponent(variant.cardId)}`, { cache: 'no-store', retries: 1 });
       item.variants[language] = normalizeCard(card, language, variant);
+      cardCache.set(`${language}:${variant.cardId}`, Promise.resolve(card));
+      return language;
     });
-  await Promise.all(jobs);
+
+  const settled = await Promise.allSettled(jobs);
+  const successful = settled.filter((entry) => entry.status === 'fulfilled').length;
 
   if (!item.variants.en && item.sourceLanguage !== 'en') {
     const source = item.variants[item.sourceLanguage];
     if (source?.cardId) {
       try {
-        const sourceCard = await fetchJson(`${API_BASE}/${item.sourceLanguage}/cards/${encodeURIComponent(source.cardId)}`);
+        const sourceCard = await fetchJson(`${API_BASE}/${item.sourceLanguage}/cards/${encodeURIComponent(source.cardId)}`, { cache: 'no-store' });
         const english = await findEnglishCounterpart(sourceCard, item.sourceLanguage);
         if (english) item.variants.en = normalizeCard(english, 'en');
       } catch {
@@ -1044,6 +1266,9 @@ async function refreshItem(item) {
       }
     }
   }
+
+  if (!successful && jobs.length) throw new Error('Keine Preisdaten konnten aktualisiert werden.');
+  return successful;
 }
 
 async function syncAllPrices(list = null) {
@@ -1087,7 +1312,8 @@ function saveCardmarketLink(language) {
 
 function openCardmarket(language) {
   const item = getItem(state.selectedId);
-  const link = item?.variants?.[language]?.cardmarketLink?.trim();
+  const input = main.querySelector(`[data-cardmarket-link="${language}"]`);
+  const link = input?.value?.trim() || item?.variants?.[language]?.cardmarketLink?.trim();
   if (!link) return;
   try {
     const url = new URL(link);
@@ -1514,11 +1740,34 @@ modalRoot.addEventListener('click', async (event) => {
   if (attach) return attachCard(parsedModalCard());
 });
 
+document.addEventListener('error', (event) => {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement) || !image.dataset.imageCandidates) return;
+  let candidates = [];
+  try { candidates = JSON.parse(image.dataset.imageCandidates || '[]'); } catch { candidates = []; }
+  const next = candidates.shift();
+  if (next) {
+    image.dataset.imageCandidates = JSON.stringify(candidates);
+    image.src = next;
+    return;
+  }
+  image.removeAttribute('data-image-candidates');
+  image.classList.add('image-failed');
+  image.src = './icons/card-placeholder.svg';
+}, true);
+
 window.addEventListener('online', () => toast('Wieder online. Preise können aktualisiert werden.'));
 window.addEventListener('offline', () => toast('Offline-Modus: Gespeicherte Karten bleiben verfügbar.'));
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(console.error));
+  window.addEventListener('load', async () => {
+    try {
+      const registration = await navigator.serviceWorker.register(`./service-worker.js?v=${APP_VERSION}`, { updateViaCache: 'none' });
+      registration.update();
+    } catch (error) {
+      console.error(error);
+    }
+  });
 }
 
 saveData();
