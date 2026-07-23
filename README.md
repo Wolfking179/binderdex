@@ -1,63 +1,57 @@
-# BinderDex – privater Kartenbinder
+# BinderDex 2 – privater 3×3-Kartenbinder
 
-BinderDex ist eine installierbare Web-App (PWA) für iPhone und andere moderne Browser. Sie verwaltet einen persönlichen Kartenbinder und eine Wunschliste, sucht Pokémon-Karten über TCGdex und speichert Cardmarket-Marktpreise sowie eigene Cardmarket-Links.
+BinderDex ist eine kostenlose, installierbare Web-App (PWA) für das iPhone. Die Sammlung bleibt lokal auf dem Gerät und benötigt weder Login noch Server-Datenbank.
 
-## Enthaltene Funktionen
+## Neue Funktionen in Version 2
 
-- Binder und Wunschliste
-- Kartensuche auf Deutsch, Englisch und Japanisch
-- Mehrere Sprachversionen in einem Karteneintrag verknüpfen
-- Cardmarket-Trend-, Niedrig-, 7-Tage- und 30-Tage-Preis
-- Eigener Cardmarket-Link je Sprachversion
-- Menge, Zustand, Holo/Normal, Kaufpreis und Notizen
-- Gesamtwert des Binders
-- Offline-Nutzung bereits geladener Inhalte
-- JSON-Export und -Import als Datensicherung
-- Keine Anmeldung und keine Datenbank: persönliche Daten bleiben im Browser
+- Echter Binder mit 3×3 Fächern pro Seite
+- Blättern per Wischgeste oder Seitentasten
+- Karten per Finger verschieben und tauschen
+- Alternativ: Karte antippen, Seite wechseln und Zielfach antippen
+- Neue Karten werden nur auf Deutsch oder Japanisch angelegt
+- Englische Vergleichskarte wird nach Möglichkeit automatisch verknüpft
+- Deutsch/Japanisch und Englisch werden gleichzeitig in der Detailansicht verglichen
+- Suche nach Name, Kartennummer und Setkürzel, z. B. `Pikachu 58 base1` oder `Glurak 199 OBF`
+- Cursor bleibt während der automatischen Suche an der richtigen Position
+- Cardmarket-Link wird automatisch als präzise Suche angelegt
+- Jeder Cardmarket-Link kann manuell überschrieben und gespeichert werden
+- Lesbarkeit und Bedienflächen für große iPhones wie das iPhone 15 Pro Max optimiert
+- Bestehende BinderDex-1-Daten werden automatisch übernommen
 
-## Wichtig zu den Preisen
+## Preis- und Linkhinweis
 
-Die Kartensuche und verfügbaren Cardmarket-Marktdaten werden über die kostenlose TCGdex-API geladen. Die App zeigt separate Preise, wenn du für Deutsch, Englisch und Japanisch jeweils die passende Ausgabe verknüpfst. Manche alten oder japanischen Ausgaben sind nicht eindeutig zugeordnet; deshalb lässt sich jede Ausgabe manuell auswählen und ihr Cardmarket-Link separat speichern.
+Die Karten- und Cardmarket-Preisdaten kommen über die kostenlose TCGdex-API. TCGdex liefert Marktpreise, aber derzeit nicht für jede Kartenvariante einen garantiert korrekten direkten Cardmarket-Produktlink. BinderDex erzeugt deshalb automatisch einen Cardmarket-Suchlink aus Kartenname, Kartennummer, Set und Sprache. Stimmt das Ergebnis nicht, kann der Link in der Detailansicht manuell ersetzt und gespeichert werden.
 
-## Kostenlos veröffentlichen
+Bei deutschen Karten lässt sich die englische Ausgabe meistens über dieselbe Karten-ID automatisch finden. Japanische Sets unterscheiden sich teilweise von internationalen Sets; dann kann die englische Vergleichskarte manuell ausgewählt werden.
 
-Eine PWA muss über HTTPS erreichbar sein, damit sie auf dem iPhone installiert werden kann. Lade den gesamten Ordner unverändert zu einem kostenlosen Static-Hosting-Dienst hoch, zum Beispiel GitHub Pages, Cloudflare Pages oder Netlify.
+## Kostenlos veröffentlichen und aktualisieren
 
-### Einfacher Ablauf
+1. Entpacke das ZIP.
+2. Lade **alle Dateien aus dem Ordner** in dein bestehendes öffentliches GitHub-Repository hoch.
+3. Ersetze dabei die alten Dateien `index.html`, `styles.css`, `app.js`, `manifest.json` und `service-worker.js`.
+4. Öffne anschließend deine GitHub-Pages-Adresse auf dem iPhone.
+5. Schließe BinderDex einmal vollständig und öffne es erneut. Der neue Service Worker ersetzt dann die alte Version.
+6. Falls weiterhin die alte Ansicht erscheint: Safari → Einstellungen → Apps → Safari → Erweitert → Website-Daten → nach deiner GitHub-Adresse suchen und nur diesen Eintrag löschen. Danach die Seite erneut öffnen und wieder zum Home-Bildschirm hinzufügen.
 
-1. Veröffentliche den kompletten Ordner `binderdex` auf einem HTTPS-Host.
-2. Öffne die erhaltene URL auf dem iPhone in Safari.
-3. Tippe auf **Teilen**.
-4. Wähle **Zum Home-Bildschirm**.
-5. Bestätige mit **Hinzufügen**.
+## Installation auf dem iPhone
 
-Danach erscheint BinderDex wie eine App auf dem Home-Bildschirm.
+1. Veröffentlichte GitHub-Pages-Adresse in Safari öffnen.
+2. Teilen-Symbol antippen.
+3. **Zum Home-Bildschirm** auswählen.
+4. **Als Web-App öffnen** aktivieren.
+5. **Hinzufügen** antippen.
 
-## Lokal testen
+## Datensicherung
 
-Ein Service Worker funktioniert nicht zuverlässig beim direkten Öffnen der Datei. Starte stattdessen im Ordner einen kleinen lokalen Webserver:
-
-```bash
-python3 -m http.server 8080
-```
-
-Öffne anschließend `http://localhost:8080`.
-
-## Datensicherheit
-
-Die Sammlung liegt in `localStorage` des verwendeten Browsers. Browserdaten löschen oder die Website-Daten entfernen löscht auch die Sammlung. Nutze unter **Mehr → Datensicherung** regelmäßig **Exportieren**.
-
-Die veröffentlichte App-URL kann grundsätzlich von anderen Personen geöffnet werden. Deine Sammlung, Notizen und Links werden dadurch nicht geteilt, weil sie nur lokal auf deinem Gerät gespeichert werden. Für einen echten Login oder eine serverseitige Synchronisierung wäre ein Backend nötig.
+Die Sammlung liegt in `localStorage`. Unter **Mehr → Datensicherung → Exportieren** lässt sich eine JSON-Datei sichern. Vor größeren Updates empfiehlt sich immer ein Export.
 
 ## Projektdateien
 
 - `index.html` – Grundstruktur
-- `styles.css` – Oberfläche und iPhone-Layout
-- `app.js` – Binder, Wunschliste, Suche, Preise und Datensicherung
+- `styles.css` – 3×3-Binder und iPhone-Oberfläche
+- `app.js` – Suche, Sprachvergleich, Kartenverschiebung, Preise und Datensicherung
 - `manifest.json` – Installationsinformationen
-- `service-worker.js` – Offline-Cache
+- `service-worker.js` – Offline-Cache und Update-Version
 - `icons/` – App-Symbole
 
-## Hinweis
-
-BinderDex ist ein inoffizielles privates Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company oder Cardmarket. Kartenbilder und Marktdaten werden über TCGdex bereitgestellt.
+BinderDex ist ein inoffizielles privates Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company oder Cardmarket.
