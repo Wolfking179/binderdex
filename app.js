@@ -1,10 +1,13 @@
 'use strict';
 
 const API_BASE = 'https://api.tcgdex.net/v2';
-const STORAGE_KEY = 'binderdex-data-v4';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
+const STORAGE_KEY = 'binderdex-data-v5';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '4.0.0';
+const APP_VERSION = '5.0.0';
+const IMAGE_DB_NAME = 'binderdex-image-store';
+const IMAGE_DB_VERSION = 1;
+const IMAGE_STORE_NAME = 'custom-images';
 const FETCH_TIMEOUT_MS = 12000;
 
 const LANGS = {
@@ -65,6 +68,8 @@ let suppressClickUntil = 0;
 let swipeStart = null;
 const cardCache = new Map();
 const setIndexCache = new Map();
+const customImageCache = new Map();
+const imageRecoveryQueue = new Set();
 const dragState = {
   timer: null,
   pointerId: null,
@@ -79,7 +84,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 4,
+    version: 5,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -122,7 +127,8 @@ function migrateData(input) {
       binderSlot = null;
     }
 
-    Object.values(variants).filter(Boolean).forEach((variant) => {
+    Object.entries(variants).filter(([, variant]) => Boolean(variant)).forEach(([code, variant]) => {
+      variant.language = variant.language || code;
       variant.pricing = sanitizePricing(variant.pricing);
       variant.priceUpdated = variant.pricing?.cardmarket?.updated || variant.priceUpdated || null;
       variant.cardmarketSearch = cardmarketSearchTerms(variant);
@@ -131,6 +137,12 @@ function migrateData(input) {
         variant.cardmarketLinkAuto = true;
       }
     });
+
+    const sourceVariantData = variants[firstLanguage];
+    if (sourceVariantData && !sourceVariantData.image && variants.en?.image && !sourceVariantData.fallbackImage) {
+      sourceVariantData.fallbackImage = variants.en.image;
+      sourceVariantData.fallbackImageLanguage = 'en';
+    }
 
     return {
       id: rawItem.id || uid(),
@@ -154,17 +166,115 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 4, collection: migrated, settings };
+  return { version: 5, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 4;
+  state.data.version = 5;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
 function uid() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function customImageKey(itemId, language) {
+  return `${itemId}:${language}`;
+}
+
+function openImageDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('IndexedDB nicht verfügbar'));
+    const request = indexedDB.open(IMAGE_DB_NAME, IMAGE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(IMAGE_STORE_NAME)) {
+        database.createObjectStore(IMAGE_STORE_NAME, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Bildspeicher konnte nicht geöffnet werden'));
+  });
+}
+
+async function loadCustomImages() {
+  try {
+    const database = await openImageDatabase();
+    const records = await new Promise((resolve, reject) => {
+      const transaction = database.transaction(IMAGE_STORE_NAME, 'readonly');
+      const request = transaction.objectStore(IMAGE_STORE_NAME).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+    customImageCache.clear();
+    records.forEach((record) => {
+      if (record?.key && record?.dataUrl) customImageCache.set(record.key, record.dataUrl);
+    });
+    database.close();
+  } catch (error) {
+    console.warn('Eigene Kartenbilder konnten nicht geladen werden.', error);
+  }
+}
+
+async function putCustomImage(key, dataUrl) {
+  const database = await openImageDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(IMAGE_STORE_NAME, 'readwrite');
+    transaction.objectStore(IMAGE_STORE_NAME).put({ key, dataUrl, updatedAt: new Date().toISOString() });
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  database.close();
+  customImageCache.set(key, dataUrl);
+}
+
+async function deleteCustomImage(key) {
+  customImageCache.delete(key);
+  try {
+    const database = await openImageDatabase();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(IMAGE_STORE_NAME, 'readwrite');
+      transaction.objectStore(IMAGE_STORE_NAME).delete(key);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+  } catch (error) {
+    console.warn('Eigenes Bild konnte nicht gelöscht werden.', error);
+  }
+}
+
+async function getAllCustomImages() {
+  try {
+    const database = await openImageDatabase();
+    const records = await new Promise((resolve, reject) => {
+      const transaction = database.transaction(IMAGE_STORE_NAME, 'readonly');
+      const request = transaction.objectStore(IMAGE_STORE_NAME).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return records;
+  } catch {
+    return [];
+  }
+}
+
+async function clearCustomImages() {
+  customImageCache.clear();
+  try {
+    const database = await openImageDatabase();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(IMAGE_STORE_NAME, 'readwrite');
+      transaction.objectStore(IMAGE_STORE_NAME).clear();
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+  } catch (error) {
+    console.warn('Bildspeicher konnte nicht geleert werden.', error);
+  }
 }
 
 function escapeHtml(value = '') {
@@ -230,32 +340,79 @@ function firstPositiveMarketPrice(market, keys) {
   return null;
 }
 
-function imageUrl(base, quality = 'low', format = 'webp') {
-  if (!base) return '';
-  if (/\.(webp|png|jpe?g)(?:\?.*)?$/i.test(base)) return base;
-  return `${base}/${quality}.${format}`;
+function uniqueValues(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
-function imageCandidates(base, quality = 'low') {
-  if (!base) return [];
-  if (/\.(webp|png|jpe?g)(?:\?.*)?$/i.test(base)) return [base];
+function imageCandidatesForSource(source, quality = 'low') {
+  if (!source) return [];
+  const value = String(source).trim();
+  if (!value) return [];
+  if (/^(?:data:|blob:)/i.test(value)) return [value];
+
+  const clean = value.replace(/[?#].*$/, '');
+  const match = clean.match(/^(.*)\/(?:low|high)\.(webp|png|jpe?g)$/i);
+  const hasImageExtension = /\.(webp|png|jpe?g)$/i.test(clean);
+  const base = match ? match[1] : (hasImageExtension ? '' : clean.replace(/\/$/, ''));
   const otherQuality = quality === 'high' ? 'low' : 'high';
-  return [
-    imageUrl(base, quality, 'webp'),
-    imageUrl(base, quality, 'png'),
-    imageUrl(base, otherQuality, 'webp'),
-    imageUrl(base, otherQuality, 'png'),
-  ];
+  const generated = base ? [
+    `${base}/${quality}.webp`,
+    `${base}/${quality}.png`,
+    `${base}/${otherQuality}.webp`,
+    `${base}/${otherQuality}.png`,
+  ] : [];
+
+  // Falls die API bereits eine vollständige URL liefert, wird diese zuerst
+  // probiert. Bei TCGdex-URLs werden zusätzlich alle Qualitäts-/Formatvarianten
+  // abgeleitet, damit Safari nicht an einer einzelnen Datei hängen bleibt.
+  return base ? uniqueValues(generated) : (hasImageExtension ? [value] : []);
 }
 
-function cardImageHtml(base, alt, options = {}) {
-  const candidates = imageCandidates(base, options.quality || 'low');
-  if (!candidates.length) return options.placeholder || '<div class="image-placeholder">Kein Bild</div>';
+function imageCandidates(sources, quality = 'low') {
+  const list = Array.isArray(sources) ? sources : [sources];
+  return uniqueValues(list.flatMap((source) => imageCandidatesForSource(source, quality)));
+}
+
+function customImageForItem(item, language) {
+  if (!item?.id || !language) return '';
+  return customImageCache.get(customImageKey(item.id, language)) || '';
+}
+
+function variantImageSources(item, variant = null) {
+  const selected = variant || sourceVariant(item);
+  const language = selected?.language || item?.sourceLanguage || 'de';
+  const english = item?.variants?.en;
+  const source = item?.variants?.[item?.sourceLanguage];
+  const other = item?.variants?.de || item?.variants?.ja;
+  return uniqueValues([
+    customImageForItem(item, language),
+    selected?.imageBroken ? '' : selected?.image,
+    selected?.fallbackImage,
+    selected !== source ? source?.image : '',
+    selected !== source ? source?.fallbackImage : '',
+    selected !== english ? english?.image : '',
+    selected !== english ? english?.fallbackImage : '',
+    selected !== other ? other?.image : '',
+  ]);
+}
+
+function cardImageHtml(sources, alt, options = {}) {
+  const candidates = imageCandidates(sources, options.quality || 'low');
+  if (!candidates.length) {
+    if (options.itemId) {
+      const language = options.language || 'de';
+      return `<img class="image-failed" src="./icons/card-placeholder.svg" data-image-placeholder-only="true" data-image-item-id="${escapeHtml(options.itemId)}" data-image-language="${escapeHtml(language)}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="lazy" decoding="async" draggable="false" />`;
+    }
+    return options.placeholder || '<div class="image-placeholder">Kein Bild</div>';
+  }
   const loading = options.eager ? 'eager' : 'lazy';
   const priority = options.eager ? 'high' : 'low';
   const className = options.className ? ` class="${escapeHtml(options.className)}"` : '';
   const draggable = options.draggable === false ? ' draggable="false"' : '';
-  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async"${draggable} />`;
+  const itemId = options.itemId ? ` data-image-item-id="${escapeHtml(options.itemId)}"` : '';
+  const language = options.language ? ` data-image-language="${escapeHtml(options.language)}"` : '';
+  const searchCardId = options.searchCardId ? ` data-search-image-card-id="${escapeHtml(options.searchCardId)}"` : '';
+  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async" referrerpolicy="no-referrer"${draggable}${itemId}${language}${searchCardId} />`;
 }
 
 function formatDate(value) {
@@ -441,6 +598,9 @@ function normalizeCard(card, language, previous = null) {
     dexId: Array.isArray(card.dexId) ? card.dexId : [],
     hp: card.hp ?? null,
     image: card.image || previous?.image || '',
+    fallbackImage: card.fallbackImage || card._fallbackImage || previous?.fallbackImage || '',
+    fallbackImageLanguage: card.fallbackImageLanguage || card._fallbackImageLanguage || previous?.fallbackImageLanguage || '',
+    imageBroken: previous?.imageBroken || false,
     pricing,
     priceUpdated: pricing?.cardmarket?.updated || previous?.priceUpdated || null,
     cardmarketLink: previousManual || automaticLink,
@@ -488,6 +648,7 @@ function render() {
   else if (state.route === 'search') renderSearch();
   else if (state.route === 'settings') renderSettings();
   else if (state.route === 'detail') renderDetail();
+  requestAnimationFrame(queueVisibleImageRepairs);
 }
 
 function renderBinder() {
@@ -564,7 +725,7 @@ function binderPocketHtml(slot, item) {
     <div class="binder-pocket ${item ? 'filled' : 'empty'} ${selected ? 'selected' : ''}" data-binder-slot="${slot}" data-slot-item="${item?.id || ''}">
       ${item ? `
         <div class="binder-card" data-binder-card data-item-id="${escapeHtml(item.id)}" role="button" tabindex="0" aria-label="${escapeHtml(item.title)} öffnen">
-          ${cardImageHtml(variant?.image, item.title, { quality: 'low', eager: true, draggable: false, placeholder: '<div class="pocket-placeholder">Kein Bild</div>' })}
+          ${cardImageHtml(variantImageSources(item, variant), item.title, { quality: 'low', eager: true, draggable: false, itemId: item.id, language: sourceCode, placeholder: '<div class="pocket-placeholder">Kein Bild</div>' })}
           <span class="pocket-lang">${escapeHtml(LANGS[sourceCode]?.short || sourceCode.toUpperCase())}</span>
           ${item.quantity > 1 ? `<span class="pocket-qty">×${item.quantity}</span>` : ''}
           ${selected ? '<span class="selected-check">✓</span>' : ''}
@@ -627,7 +788,7 @@ function collectionCardHtml(item) {
   return `
     <button class="collection-card" data-open-card="${escapeHtml(item.id)}">
       <div class="card-art">
-        ${cardImageHtml(variant?.image, variant?.name, { quality: 'low', placeholder: '<div class="placeholder-card">Kein Bild</div>' })}
+        ${cardImageHtml(variantImageSources(item, variant), variant?.name, { quality: 'low', itemId: item.id, language: item.sourceLanguage, placeholder: '<div class="placeholder-card">Kein Bild</div>' })}
         <span class="card-badge">${escapeHtml(LANGS[item.sourceLanguage]?.short || '–')} · ${escapeHtml(item.finish === 'holo' ? 'HOLO' : 'NORMAL')}</span>
       </div>
       <div class="card-info">
@@ -709,7 +870,7 @@ function searchResultsHtml() {
 
   return `<div class="results-list">${state.searchResults.map((card) => `
     <button class="result-card" data-search-result="${escapeHtml(card.id)}">
-      ${cardImageHtml(card.image, card.name, { quality: 'low', placeholder: '<div class="result-placeholder"></div>' })}
+      ${cardImageHtml([card.image, card._fallbackImage], card.name, { quality: 'low', searchCardId: card.id, placeholder: '<div class="result-placeholder"></div>' })}
       <div>
         <h3>${escapeHtml(card.name)}</h3>
         <p>${escapeHtml(card.set?.name || 'Set unbekannt')}</p>
@@ -943,6 +1104,65 @@ async function searchCards(parsed, language) {
     .map((entry) => entry.card);
 }
 
+async function resolveCardDisplayImage(card, language) {
+  if (!card) return card;
+  let detailed = card;
+
+  if (!detailed.image && detailed.id) {
+    try {
+      const full = await fetchCard(language, detailed.id);
+      detailed = { ...detailed, ...full, set: full.set || detailed.set };
+    } catch {
+      // Die kompakte Trefferkarte bleibt verwendbar.
+    }
+  }
+
+  if (detailed.image || language === 'en') return detailed;
+
+  let english = null;
+  try {
+    english = await fetchCard('en', detailed.id);
+  } catch {
+    // Sprachübergreifende IDs sind nicht immer identisch.
+  }
+
+  if (!english?.image && detailed.set?.id && detailed.localId) {
+    try {
+      english = await fetchJson(`${API_BASE}/en/sets/${encodeURIComponent(detailed.set.id)}/${encodeURIComponent(detailed.localId)}`);
+    } catch {
+      // Für japanische Sets existiert oft kein identischer englischer Setcode.
+    }
+  }
+
+  if (english?.image) {
+    return { ...detailed, _fallbackImage: english.image, _fallbackImageLanguage: 'en' };
+  }
+  return detailed;
+}
+
+async function resolveMissingSearchImages(requestId) {
+  const targets = state.searchResults.filter((card) => !card.image && !card._fallbackImage).slice(0, 12);
+  if (!targets.length) return;
+  let changed = false;
+  for (let index = 0; index < targets.length; index += 3) {
+    const batch = targets.slice(index, index + 3);
+    const resolved = await Promise.allSettled(batch.map((card) => resolveCardDisplayImage(card, state.searchLang)));
+    if (requestId !== searchRequestId) return;
+    resolved.forEach((entry, offset) => {
+      if (entry.status !== 'fulfilled') return;
+      const original = batch[offset];
+      const next = entry.value;
+      if (!next?.image && !next?._fallbackImage) return;
+      const resultIndex = state.searchResults.findIndex((card) => card.id === original.id);
+      if (resultIndex >= 0) {
+        state.searchResults[resultIndex] = next;
+        changed = true;
+      }
+    });
+    if (changed) updateSearchResults();
+  }
+}
+
 async function performSearch(query) {
   const requestId = ++searchRequestId;
   const clean = query.trim();
@@ -972,6 +1192,7 @@ async function performSearch(query) {
     if (requestId !== searchRequestId) return;
     state.searchLoading = false;
     updateSearchResults();
+    resolveMissingSearchImages(requestId).catch((error) => console.warn('Bild-Fallback fehlgeschlagen.', error));
   }
 }
 
@@ -979,7 +1200,8 @@ async function openSearchPreview(cardId) {
   modalRoot.innerHTML = '<div class="modal"><div class="modal-handle"></div><div class="loading"><div><div class="spinner"></div>Kartendetails werden geladen …</div></div></div>';
   try {
     const card = await fetchCard(state.searchLang, cardId);
-    renderPreviewModal(card);
+    const withImage = await resolveCardDisplayImage(card, state.searchLang);
+    renderPreviewModal(withImage);
   } catch (error) {
     console.error(error);
     closeModal();
@@ -1002,7 +1224,7 @@ function renderPreviewModal(card) {
         <button class="icon-button" data-close-modal aria-label="Schließen">×</button>
       </div>
       <div class="preview-layout">
-        ${cardImageHtml(card.image, card.name, { quality: 'high', eager: true, placeholder: '<div class="preview-image-placeholder">Kein Bild</div>' })}
+        ${cardImageHtml([card.image, card._fallbackImage], card.name, { quality: 'high', eager: true, searchCardId: card.id, placeholder: '<div class="preview-image-placeholder">Kein Bild</div>' })}
         <div>
           <span class="preview-language">${escapeHtml(LANGS[state.searchLang].label)}</span>
           <h3>${escapeHtml(card.name)}</h3>
@@ -1107,7 +1329,13 @@ async function addCard(card, list) {
   modalRoot.innerHTML = '<div class="modal"><div class="modal-handle"></div><div class="loading"><div><div class="spinner"></div>Englischer Vergleich wird gesucht …</div></div></div>';
   try {
     const english = await findEnglishCounterpart(card, language);
-    if (english) item.variants.en = normalizeCard(english, 'en');
+    if (english) {
+      item.variants.en = normalizeCard(english, 'en');
+      if (!item.variants[language]?.image && english.image) {
+        item.variants[language].fallbackImage = english.image;
+        item.variants[language].fallbackImageLanguage = 'en';
+      }
+    }
   } catch (error) {
     console.warn('Englische Vergleichskarte nicht gefunden.', error);
   }
@@ -1129,11 +1357,167 @@ function attachCard(card) {
   if (!item) return;
   const previous = item.variants?.[context.lang];
   item.variants[context.lang] = normalizeCard(card, context.lang, previous);
+  if (context.lang === 'en') {
+    const source = item.variants?.[item.sourceLanguage];
+    if (source && !source.image && item.variants.en?.image) {
+      source.fallbackImage = item.variants.en.image;
+      source.fallbackImageLanguage = 'en';
+    }
+  }
   saveData();
   closeModal();
   state.attachContext = null;
   toast('Englischer Vergleich wurde gespeichert.');
   navigate('detail', item.id);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Bild konnte nicht gelesen werden'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageFile(file) {
+  if (!file?.type?.startsWith('image/')) throw new Error('Bitte eine Bilddatei auswählen.');
+  if (file.size > 18 * 1024 * 1024) throw new Error('Das Bild ist zu groß.');
+  const dataUrl = await readFileAsDataUrl(file);
+  const image = await new Promise((resolve, reject) => {
+    const element = new Image();
+    element.onload = () => resolve(element);
+    element.onerror = () => reject(new Error('Bildformat wird nicht unterstützt.'));
+    element.src = dataUrl;
+  });
+  const maxWidth = 900;
+  const maxHeight = 1240;
+  const scale = Math.min(1, maxWidth / image.naturalWidth, maxHeight / image.naturalHeight);
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false });
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL('image/jpeg', 0.8);
+}
+
+function chooseCustomImage() {
+  const item = getItem(state.selectedId);
+  if (!item) return;
+  const language = item.sourceLanguage || sourceVariant(item)?.language || 'de';
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    toast('Bild wird vorbereitet …');
+    try {
+      const dataUrl = await compressImageFile(file);
+      await putCustomImage(customImageKey(item.id, language), dataUrl);
+      renderDetail();
+      toast('Eigenes Kartenbild wurde gespeichert.');
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Bild konnte nicht gespeichert werden.');
+    }
+  }, { once: true });
+  input.click();
+}
+
+async function removeCustomImage() {
+  const item = getItem(state.selectedId);
+  if (!item) return;
+  const language = item.sourceLanguage || sourceVariant(item)?.language || 'de';
+  await deleteCustomImage(customImageKey(item.id, language));
+  renderDetail();
+  toast('Eigenes Kartenbild wurde entfernt.');
+}
+
+async function recoverItemImage(itemId, language, forceFallback = false) {
+  const queueKey = `${itemId}:${language}`;
+  if (imageRecoveryQueue.has(queueKey) || !navigator.onLine) return false;
+  const item = getItem(itemId);
+  let variant = item?.variants?.[language] || sourceVariant(item);
+  if (!item || !variant?.cardId) return false;
+  imageRecoveryQueue.add(queueKey);
+  let changed = false;
+  try {
+    let sourceCard = null;
+    try {
+      sourceCard = await fetchJson(`${API_BASE}/${language}/cards/${encodeURIComponent(variant.cardId)}`, { cache: 'no-store', retries: 1 });
+      const fresh = normalizeCard(sourceCard, language, variant);
+      if (fresh.image && !forceFallback) {
+        fresh.imageBroken = false;
+        item.variants[language] = fresh;
+        variant = fresh;
+        changed = true;
+      } else {
+        variant.imageBroken = Boolean(forceFallback);
+      }
+    } catch {
+      variant.imageBroken = Boolean(forceFallback);
+    }
+
+    if (!variant.image || forceFallback || variant.imageBroken) {
+      const source = sourceCard || variant;
+      let english = item.variants?.en;
+      if (!english?.image) {
+        try {
+          const found = await findEnglishCounterpart(source, language);
+          if (found) {
+            english = normalizeCard(found, 'en', english);
+            item.variants.en = english;
+            changed = true;
+          }
+        } catch {
+          // Eigenes Bild bleibt als letzte, zuverlässige Option verfügbar.
+        }
+      }
+      if (english?.image && variant.fallbackImage !== english.image) {
+        variant.fallbackImage = english.image;
+        variant.fallbackImageLanguage = 'en';
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      saveData();
+      if (state.route === 'detail' && state.selectedId === itemId) renderDetail();
+      else if (state.route === 'binder') renderBinder();
+      else if (state.route === 'wishlist') renderWishlist();
+    }
+    return changed;
+  } finally {
+    imageRecoveryQueue.delete(queueKey);
+  }
+}
+
+function queueVisibleImageRepairs() {
+  if (!navigator.onLine) return;
+  const placeholders = [...main.querySelectorAll('[data-image-placeholder-only="true"]')].slice(0, 6);
+  placeholders.forEach((element) => {
+    recoverItemImage(element.dataset.imageItemId, element.dataset.imageLanguage, false)
+      .catch((error) => console.warn('Automatische Bildreparatur fehlgeschlagen.', error));
+  });
+}
+
+async function repairAllImages() {
+  const items = state.data.collection.filter((item) => sourceVariant(item)?.cardId);
+  if (!items.length) return toast('Noch keine Karten zum Prüfen vorhanden.');
+  toast(`Bilder für ${items.length} Karte${items.length === 1 ? '' : 'n'} werden geprüft …`);
+  let repaired = 0;
+  for (let index = 0; index < items.length; index += 3) {
+    const batch = items.slice(index, index + 3);
+    const settled = await Promise.allSettled(batch.map((item) => recoverItemImage(item.id, item.sourceLanguage, false)));
+    repaired += settled.filter((entry) => entry.status === 'fulfilled' && entry.value).length;
+  }
+  render();
+  toast(repaired ? `${repaired} Kartenbilder wurden ergänzt.` : 'Keine weiteren Datenbankbilder gefunden. Nutze bei Bedarf „Eigenes Bild wählen“.');
 }
 
 function renderDetail() {
@@ -1146,10 +1530,19 @@ function renderDetail() {
   const variant = sourceVariant(item);
   const sourceLanguage = item.sourceLanguage || variant?.language || 'de';
   const compareLanguages = sourceLanguage === 'en' ? ['en'] : [sourceLanguage, 'en'];
+  const hasCustomImage = Boolean(customImageForItem(item, sourceLanguage));
+  const usesFallbackImage = !hasCustomImage && !variant?.image && variantImageSources(item, variant).length > 0;
 
   main.innerHTML = `
     <section class="detail-hero">
-      <div class="detail-art">${cardImageHtml(variant?.image, variant?.name, { quality: 'high', eager: true, placeholder: '<div class="detail-image-placeholder">Kein Bild</div>' })}</div>
+      <div class="detail-art">
+        ${cardImageHtml(variantImageSources(item, variant), variant?.name, { quality: 'high', eager: true, itemId: item.id, language: sourceLanguage, placeholder: '<div class="detail-image-placeholder">Kein Bild</div>' })}
+        <div class="image-action-row">
+          <button class="image-action-button" data-choose-custom-image>Eigenes Bild wählen</button>
+          ${hasCustomImage ? '<button class="image-action-button subtle" data-remove-custom-image>Eigenes Bild entfernen</button>' : ''}
+        </div>
+        ${usesFallbackImage ? '<p class="image-source-note">Ersatzbild einer verknüpften Sprachversion</p>' : ''}
+      </div>
       <div class="detail-main">
         <span class="source-pill">Deine Karte · ${escapeHtml(LANGS[sourceLanguage]?.label || sourceLanguage)}</span>
         <h2>${escapeHtml(item.title || variant?.name || 'Karte')}</h2>
@@ -1275,8 +1668,8 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Preis-Hotfix: Nullwerte werden verworfen, englische Referenzpreise automatisch repariert und alte Preisfelder neu geladen.</p></div>
-        <span class="version-badge">V4</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Bild-Update: stabilere Ladewege, englische Ersatzbilder und eigene Kartenfotos auf dem Gerät.</p></div>
+        <span class="version-badge">V5</span>
       </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
@@ -1297,6 +1690,12 @@ function renderSettings() {
         <h3>Preise reparieren</h3>
         <p>Lädt fehlende deutsche, japanische und englische Vergleichspreise erneut und verwirft alte Nullwerte.</p>
         <button class="primary-button full-button" data-repair-prices>Alle Preise neu prüfen</button>
+      </section>
+
+      <section class="settings-card">
+        <h3>Bilder reparieren</h3>
+        <p>Prüft fehlende Scans erneut und verwendet nach Möglichkeit das passende englische Kartenbild. In den Kartendetails kannst du zusätzlich ein eigenes Foto speichern.</p>
+        <button class="primary-button full-button" data-repair-images>Alle Bilder neu prüfen</button>
       </section>
 
       <section class="settings-card">
@@ -1359,6 +1758,13 @@ async function refreshItem(item) {
         // Manuelle Auswahl bleibt verfügbar.
       }
     }
+  }
+
+  const sourceVariantData = item.variants?.[item.sourceLanguage];
+  const englishVariant = item.variants?.en;
+  if (sourceVariantData && !sourceVariantData.image && englishVariant?.image) {
+    sourceVariantData.fallbackImage = englishVariant.image;
+    sourceVariantData.fallbackImageLanguage = 'en';
   }
 
   if (!successful && jobs.length) throw new Error('Keine Preisdaten konnten aktualisiert werden.');
@@ -1493,9 +1899,10 @@ function moveBinderCard(itemId, targetSlot) {
   toast(occupant ? 'Karten wurden getauscht.' : 'Karte wurde verschoben.');
 }
 
-function deleteItem() {
+async function deleteItem() {
   const item = getItem(state.selectedId);
   if (!item || !confirm(`„${item.title}“ wirklich löschen?`)) return;
+  await Promise.all(Object.keys(LANGS).map((language) => deleteCustomImage(customImageKey(item.id, language))));
   state.data.collection = state.data.collection.filter((entry) => entry.id !== item.id);
   saveData();
   toast('Eintrag gelöscht.');
@@ -1523,9 +1930,10 @@ function downloadJson(data, filename) {
   URL.revokeObjectURL(url);
 }
 
-function exportAll() {
-  downloadJson(state.data, `binderdex-backup-${new Date().toISOString().slice(0, 10)}.json`);
-  toast('Sicherung wurde erstellt.');
+async function exportAll() {
+  const customImages = await getAllCustomImages();
+  downloadJson({ ...state.data, customImages }, `binderdex-backup-${new Date().toISOString().slice(0, 10)}.json`);
+  toast('Sicherung inklusive eigener Kartenbilder wurde erstellt.');
 }
 
 function exportSingle() {
@@ -1544,9 +1952,15 @@ function importAll() {
     try {
       const parsed = JSON.parse(await file.text());
       state.data = migrateData(parsed);
+      if (Array.isArray(parsed.customImages)) {
+        await clearCustomImages();
+        for (const record of parsed.customImages) {
+          if (record?.key && record?.dataUrl) await putCustomImage(record.key, record.dataUrl);
+        }
+      }
       saveData();
       render();
-      toast('Sicherung importiert.');
+      toast('Sicherung inklusive Kartenbildern importiert.');
     } catch {
       toast('Diese Sicherungsdatei ist ungültig.');
     }
@@ -1780,6 +2194,8 @@ main.addEventListener('click', (event) => {
   if (openLink) return openCardmarket(openLink.dataset.openCardmarket);
   const saveLink = target.closest('[data-save-cardmarket]');
   if (saveLink) return saveCardmarketLink(saveLink.dataset.saveCardmarket);
+  if (target.closest('[data-choose-custom-image]')) return chooseCustomImage();
+  if (target.closest('[data-remove-custom-image]')) return removeCustomImage();
   if (target.closest('[data-refresh-item]')) {
     const item = getItem(state.selectedId);
     if (!item) return;
@@ -1794,6 +2210,10 @@ main.addEventListener('click', (event) => {
 
   if (target.closest('[data-export-all]')) return exportAll();
   if (target.closest('[data-import-all]')) return importAll();
+  if (target.closest('[data-repair-images]')) return repairAllImages().catch((error) => {
+    console.error(error);
+    toast('Bildprüfung fehlgeschlagen. Prüfe deine Internetverbindung.');
+  });
   if (target.closest('[data-repair-prices]')) {
     delete state.data.settings.priceRepairVersion;
     saveData();
@@ -1808,8 +2228,9 @@ main.addEventListener('click', (event) => {
     if (!confirm('Wirklich alle BinderDex-Daten auf diesem Gerät löschen?')) return;
     state.data = defaultData();
     state.binderPage = 0;
+    clearCustomImages().catch(() => {});
     saveData();
-    toast('Alle Daten wurden gelöscht.');
+    toast('Alle Daten und eigenen Kartenbilder wurden gelöscht.');
     return render();
   }
 });
@@ -1888,6 +2309,10 @@ document.addEventListener('error', (event) => {
   image.removeAttribute('data-image-candidates');
   image.classList.add('image-failed');
   image.src = './icons/card-placeholder.svg';
+  if (image.dataset.imageItemId && image.dataset.imageLanguage) {
+    recoverItemImage(image.dataset.imageItemId, image.dataset.imageLanguage, true)
+      .catch((error) => console.warn('Bild-Fallback konnte nicht geladen werden.', error));
+  }
 }, true);
 
 window.addEventListener('online', () => toast('Wieder online. Preise können aktualisiert werden.'));
@@ -1906,6 +2331,7 @@ if ('serviceWorker' in navigator) {
 
 saveData();
 render();
+loadCustomImages().then(() => render()).catch(() => {});
 setTimeout(() => {
   repairMissingPricesOnce().catch((error) => console.warn('Automatische Preisreparatur fehlgeschlagen.', error));
 }, 900);
