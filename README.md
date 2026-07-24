@@ -1,55 +1,78 @@
-# BinderDex 6.0.0 – Doppelter Bild-Fallback
+# BinderDex 7.0.0 – eigenes Kartenbild per Link
 
-Diese Version behebt den Fall, dass Karten trotz „Bilder reparieren“ weiterhin ohne Bild blieben.
+BinderDex 7 ergänzt eine zuverlässige manuelle Bildquelle. Für jede gespeicherte Karte kann ein eigener direkter HTTPS-Bild-Link hinterlegt werden. Dieser Link wird vor den automatischen Bilddatenbanken verwendet.
 
-## Was in Version 6 geändert wurde
+## Neu in Version 7
 
-- BinderDex nutzt nun **zwei voneinander unabhängige Bildquellen**:
-  1. TCGdex
-  2. Pokémon TCG API / `images.pokemontcg.io`
-- Alte V5-Markierungen wie „Bild defekt“ werden beim ersten Start automatisch zurückgesetzt.
-- Set-IDs werden für die zweite Bildquelle automatisch übersetzt, zum Beispiel:
-  - `sv03` → `sv3`
-  - `sv03.5` → `sv3pt5`
-  - `swsh3.5` → `swsh35`
-- Führende Nullen in Kartennummern werden für die zweite Quelle berücksichtigt, zum Beispiel `001` → `1`.
-- TCGdex-Bilder werden zusätzlich als WebP, PNG und JPG sowie in niedriger und hoher Auflösung probiert.
-- Fehlt das Bild der deutschen oder japanischen Ausgabe, wird zuerst die verknüpfte englische Ausgabe verwendet.
-- Reicht auch das nicht, wird die Karte über Set, Nummer, Name, Illustrator, HP und Pokédex-Nummer in der zweiten Datenbank abgeglichen.
-- In jeder Kartendetailansicht gibt es jetzt **„Bild erneut suchen“**.
-- Unter **Mehr → Bilder reparieren** werden alle Karten in beiden Quellen neu geprüft.
-- Ein eigenes Foto oder Bild kann weiterhin lokal gespeichert werden.
-- Daten aus V1 bis V5 werden automatisch übernommen.
+- Neues Feld **„Eigenes Kartenbild per Link“** in der Kartendetailansicht.
+- Der Link wird vor TCGdex, Pokémon TCG API und Sprach-Ersatzbildern geladen.
+- Links ohne sichtbare Dateiendung und Links mit Query-Parametern werden unterstützt.
+- Der Link wird vor dem Speichern als echtes Bild getestet.
+- Externe Bilder werden ohne Referrer geladen, damit weniger Bildserver das Einbetten blockieren.
+- Fällt der gespeicherte Link später aus, probiert BinderDex automatisch die bisherigen Bildquellen.
+- Der Bild-Link kann jederzeit geändert oder entfernt werden.
+- Gespeicherte Bild-Links sind im vollständigen BinderDex-Export enthalten.
+- Bestehende Daten aus V1 bis V6 werden automatisch übernommen.
+
+## Welcher Link funktioniert?
+
+Benötigt wird ein **direkter HTTPS-Link zum Bild**. Beim Öffnen des Links im Browser sollte möglichst nur das Bild erscheinen.
+
+Geeignet:
+
+```text
+https://beispiel.de/bilder/meine-karte.jpg
+https://bilder.example.com/card?id=12345
+```
+
+Nicht geeignet:
+
+```text
+https://www.cardmarket.com/de/Pokemon/Products/Singles/...
+```
+
+Der zweite Link führt zu einer Webseite und nicht direkt zu einer Bilddatei.
+
+Manche Webseiten verhindern das Anzeigen ihrer Bilder in anderen Apps. In diesem Fall meldet BinderDex, dass der Link nicht geladen werden konnte. Dann kann ein anderer Bild-Link oder weiterhin **„Eigenes Bild wählen“** verwendet werden.
+
+## Eigenen Bild-Link speichern
+
+1. Karte im Binder oder in der Wunschliste öffnen.
+2. Zum Bereich **„Eigenes Kartenbild per Link“** scrollen.
+3. Den direkten Bild-Link einfügen.
+4. **„Link testen & speichern“** antippen.
+5. Nach erfolgreicher Prüfung wird das Bild sofort in Detailansicht, Binder und Wunschliste verwendet.
+
+Über **„Gespeicherten Bild-Link entfernen“** wird wieder auf die automatischen Bildquellen umgeschaltet.
 
 ## Update auf GitHub Pages
 
-1. In der bisherigen App unter **Mehr → Datensicherung → Exportieren** ein Backup erstellen.
-2. `binderdex-v6-image-fallback.zip` entpacken.
+1. In der bisherigen App zuerst **Mehr → Datensicherung → Exportieren** verwenden.
+2. `binderdex-v7-image-link.zip` herunterladen und entpacken.
 3. Im bestehenden GitHub-Repository **Add file → Upload files** öffnen.
-4. Alle Dateien und den Ordner `icons` hochladen und vorhandene Dateien ersetzen.
-5. **Commit changes** anklicken.
-6. Die App in Safari mit `?v=6` öffnen, zum Beispiel:
+4. Diese Dateien und den Ordner `icons` direkt im Hauptverzeichnis ersetzen:
+   - `index.html`
+   - `app.js`
+   - `styles.css`
+   - `manifest.json`
+   - `service-worker.js`
+   - `README.md`
+   - `icons/`
+5. **Commit changes** auswählen.
+6. Die GitHub-Pages-Adresse in Safari mit `?v=7` öffnen:
 
-   `https://DEINNAME.github.io/binderdex/?v=6`
+```text
+https://DEINNAME.github.io/binderdex/?v=7
+```
 
-7. Unter **Mehr** prüfen, ob **BinderDex 6.0.0** und das Abzeichen **V6** angezeigt werden.
-8. Unter **Mehr → Bilder reparieren → Alle Bilder in beiden Quellen prüfen** starten.
+7. Unter **Mehr** kontrollieren, ob **BinderDex 7.0.0** und **V7** angezeigt werden.
 
-## Eine einzelne fehlende Karte prüfen
+## Falls weiterhin V6 erscheint
 
-1. Die Karte im Binder öffnen.
-2. Unter dem Kartenbild auf **Bild erneut suchen** tippen.
-3. BinderDex prüft TCGdex, die englische Vergleichskarte und anschließend die zweite Bilddatenbank.
-4. Wird kein automatischer Treffer gefunden, kann über **Eigenes Bild wählen** ein Foto aufgenommen oder aus der Fotomediathek gewählt werden.
+Vor dem Löschen von Website-Daten unbedingt ein Backup exportieren.
 
-## Falls weiterhin Version 5 erscheint
-
-1. Zuerst ein Backup exportieren.
-2. BinderDex vom Home-Bildschirm entfernen.
-3. Unter **Einstellungen → Apps → Safari → Erweitert → Website-Daten** den Eintrag der eigenen `github.io`-Adresse löschen.
-4. Die Seite erneut mit `?v=6` öffnen.
-5. Wieder über Safari zum Home-Bildschirm hinzufügen.
-
-## Technischer Hinweis
-
-Einige japanische Karten oder Sonderkarten besitzen in keiner öffentlichen Datenbank einen passenden Scan. In diesem Fall kann keine automatische Quelle ein Bild liefern. Dafür bleibt die lokale Fotoauswahl als zuverlässiger letzter Weg verfügbar.
+1. BinderDex vom Home-Bildschirm entfernen.
+2. Auf dem iPhone **Einstellungen → Apps → Safari → Erweitert → Website-Daten** öffnen.
+3. Den Eintrag der eigenen `github.io`-Adresse löschen.
+4. Die Seite erneut mit `?v=7` in Safari öffnen.
+5. Über **Teilen → Zum Home-Bildschirm** wieder installieren.

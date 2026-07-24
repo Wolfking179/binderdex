@@ -1,12 +1,12 @@
-const CACHE_VERSION = 'binderdex-v6.0.0';
+const CACHE_VERSION = 'binderdex-v7.0.0';
 const APP_CACHE = `${CACHE_VERSION}-app`;
 const API_CACHE = `${CACHE_VERSION}-api`;
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=6.0.0',
-  './app.js?v=6.0.0',
-  './manifest.json?v=6.0.0',
+  './styles.css?v=7.0.0',
+  './app.js?v=7.0.0',
+  './manifest.json?v=7.0.0',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',

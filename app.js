@@ -3,10 +3,10 @@
 const API_BASE = 'https://api.tcgdex.net/v2';
 const SECONDARY_IMAGE_API_BASE = 'https://api.pokemontcg.io/v2';
 const SECONDARY_IMAGE_CDN = 'https://images.pokemontcg.io';
-const STORAGE_KEY = 'binderdex-data-v6';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
+const STORAGE_KEY = 'binderdex-data-v7';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v6', 'binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '6.0.0';
+const APP_VERSION = '7.0.0';
 const IMAGE_DB_NAME = 'binderdex-image-store';
 const IMAGE_DB_VERSION = 1;
 const IMAGE_STORE_NAME = 'custom-images';
@@ -87,7 +87,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 6,
+    version: 7,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -144,8 +144,10 @@ function migrateData(input) {
       variant.externalImageBroken = Boolean(variant.externalImageBroken);
       variant.secondaryDerivedBroken = Boolean(variant.secondaryDerivedBroken);
       variant.imageRecoveryAttemptedAt = variant.imageRecoveryAttemptedAt || null;
+      variant.customImageUrl = String(variant.customImageUrl || '').trim();
+      variant.customImageUrlUpdatedAt = variant.customImageUrlUpdatedAt || null;
       // V5 konnte funktionierende URLs dauerhaft als defekt markieren. Beim
-      // ersten Start von V6 werden alle alten Markierungen einmal zurückgesetzt.
+      // ersten Start ab V6 werden alle alten Markierungen einmal zurückgesetzt.
       if (previousVersion < 6) {
         variant.imageBroken = false;
         variant.externalImageBroken = false;
@@ -186,11 +188,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 6, collection: migrated, settings };
+  return { version: 7, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 6;
+  state.data.version = 7;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -371,6 +373,8 @@ function imageCandidatesForSource(source, quality = 'low') {
   if (/^(?:data:|blob:)/i.test(value)) return [value];
 
   const clean = value.replace(/[?#].*$/, '');
+  let hostname = '';
+  try { hostname = new URL(value).hostname.toLowerCase(); } catch { hostname = ''; }
 
   // Die zweite Bildquelle liefert kleine Bilder als /123.png und große Bilder
   // als /123_hires.png. Je nach Ansicht wird die passende Größe zuerst geladen.
@@ -384,8 +388,9 @@ function imageCandidatesForSource(source, quality = 'low') {
   }
 
   const match = clean.match(/^(.*)\/(?:low|high)\.(webp|png|jpe?g)$/i);
-  const hasImageExtension = /\.(webp|png|jpe?g)$/i.test(clean);
-  const base = match ? match[1] : (hasImageExtension ? '' : clean.replace(/\/$/, ''));
+  const hasImageExtension = /\.(webp|png|jpe?g|avif|gif)$/i.test(clean);
+  const isTcgdexAsset = hostname === 'assets.tcgdex.net';
+  const base = match ? match[1] : (isTcgdexAsset && !hasImageExtension ? clean.replace(/\/$/, '') : '');
   const otherQuality = quality === 'high' ? 'low' : 'high';
   const generated = base ? [
     `${base}/${quality}.webp`,
@@ -396,7 +401,9 @@ function imageCandidatesForSource(source, quality = 'low') {
     `${base}/${otherQuality}.jpg`,
   ] : [];
 
-  return base ? uniqueValues(generated) : (hasImageExtension ? [value] : []);
+  // Frei eingefügte Bild-Links dürfen Query-Parameter besitzen und müssen
+  // keine Dateiendung haben. Nur TCGdex-Basis-URLs werden erweitert.
+  return base ? uniqueValues(generated) : (/^https?:\/\//i.test(value) ? [value] : []);
 }
 
 function imageCandidates(sources, quality = 'low') {
@@ -478,6 +485,7 @@ function variantImageSources(item, variant = null) {
   const derivedVariant = english || selected;
   return uniqueValues([
     customImageForItem(item, language),
+    selected?.customImageUrl,
     selected?.imageBroken ? '' : selected?.image,
     selected?.externalImageBroken ? '' : selected?.externalImageSmall,
     selected?.externalImageBroken ? '' : selected?.externalImageLarge,
@@ -510,7 +518,7 @@ function cardImageHtml(sources, alt, options = {}) {
   const itemId = options.itemId ? ` data-image-item-id="${escapeHtml(options.itemId)}"` : '';
   const language = options.language ? ` data-image-language="${escapeHtml(options.language)}"` : '';
   const searchCardId = options.searchCardId ? ` data-search-image-card-id="${escapeHtml(options.searchCardId)}"` : '';
-  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async"${draggable}${itemId}${language}${searchCardId} />`;
+  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async" referrerpolicy="no-referrer"${draggable}${itemId}${language}${searchCardId} />`;
 }
 
 function formatDate(value) {
@@ -1653,6 +1661,91 @@ async function removeCustomImage() {
   toast('Eigenes Kartenbild wurde entfernt.');
 }
 
+function normalizeCustomImageUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Bitte einen vollständigen Bild-Link einfügen.');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Der Bild-Link muss mit https:// beginnen.');
+  }
+  return parsed.href;
+}
+
+function testCustomImageUrl(url, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      image.onload = null;
+      image.onerror = null;
+      if (error) reject(error);
+      else resolve(true);
+    };
+    const timer = setTimeout(() => finish(new Error('Das Bild lädt zu lange. Prüfe den Link.')), timeoutMs);
+    image.referrerPolicy = 'no-referrer';
+    image.onload = () => {
+      if (image.naturalWidth < 40 || image.naturalHeight < 40) {
+        finish(new Error('Der Link enthält kein brauchbares Kartenbild.'));
+        return;
+      }
+      finish();
+    };
+    image.onerror = () => finish(new Error('Der Link konnte nicht als Bild geladen werden. Verwende einen direkten Bild-Link.'));
+    image.src = url;
+  });
+}
+
+async function saveCustomImageUrl() {
+  const item = getItem(state.selectedId);
+  if (!item) return;
+  const language = item.sourceLanguage || sourceVariant(item)?.language || 'de';
+  const variant = item.variants?.[language] || sourceVariant(item);
+  const input = main.querySelector('[data-custom-image-url]');
+  if (!variant || !input) return;
+
+  let url;
+  try {
+    url = normalizeCustomImageUrl(input.value);
+  } catch (error) {
+    return toast(error.message || 'Ungültiger Bild-Link.');
+  }
+  if (!url) return removeCustomImageUrl();
+
+  toast('Bild-Link wird geprüft …');
+  try {
+    await testCustomImageUrl(url);
+    variant.customImageUrl = url;
+    variant.customImageUrlUpdatedAt = new Date().toISOString();
+    saveData();
+    renderDetail();
+    toast('Bild-Link wurde gespeichert und wird jetzt verwendet.');
+  } catch (error) {
+    console.error(error);
+    toast(error.message || 'Bild-Link konnte nicht geladen werden.');
+  }
+}
+
+function removeCustomImageUrl() {
+  const item = getItem(state.selectedId);
+  if (!item) return;
+  const language = item.sourceLanguage || sourceVariant(item)?.language || 'de';
+  const variant = item.variants?.[language] || sourceVariant(item);
+  if (!variant) return;
+  variant.customImageUrl = '';
+  variant.customImageUrlUpdatedAt = null;
+  saveData();
+  renderDetail();
+  toast('Eigener Bild-Link wurde entfernt.');
+}
+
 async function recoverItemImage(itemId, language, forceFallback = false, ignoreCooldown = false) {
   const queueKey = `${itemId}:${language}`;
   if (imageRecoveryQueue.has(queueKey) || !navigator.onLine) return false;
@@ -1745,7 +1838,8 @@ async function recoverItemImage(itemId, language, forceFallback = false, ignoreC
     return Boolean(variant.image && !variant.imageBroken)
       || Boolean(variant.fallbackImage)
       || Boolean(variant.externalImageSmall && !variant.externalImageBroken)
-      || Boolean(customImageForItem(item, language));
+      || Boolean(customImageForItem(item, language))
+      || Boolean(variant.customImageUrl);
   } finally {
     imageRecoveryQueue.delete(queueKey);
   }
@@ -1771,7 +1865,7 @@ async function repairAllImages() {
     repaired += settled.filter((entry) => entry.status === 'fulfilled' && entry.value).length;
   }
   render();
-  toast(repaired ? `${repaired} Kartenbilder wurden ergänzt.` : 'Keine weiteren Bilder in beiden Datenbanken gefunden. Nutze bei Bedarf „Eigenes Bild wählen“.');
+  toast(repaired ? `${repaired} Kartenbilder wurden ergänzt.` : 'Keine weiteren automatischen Bilder gefunden. Nutze ein eigenes Foto oder füge einen direkten Bild-Link ein.');
 }
 
 function renderDetail() {
@@ -1785,11 +1879,16 @@ function renderDetail() {
   const sourceLanguage = item.sourceLanguage || variant?.language || 'de';
   const compareLanguages = sourceLanguage === 'en' ? ['en'] : [sourceLanguage, 'en'];
   const hasCustomImage = Boolean(customImageForItem(item, sourceLanguage));
-  const usesExternalImage = !hasCustomImage && Boolean(variant?.externalImageSmall || variant?.externalImageLarge);
-  const usesFallbackImage = !hasCustomImage && (variant?.imageBroken || !variant?.image) && variantImageSources(item, variant).length > 0;
-  const imageSourceNote = usesExternalImage
-    ? 'Ersatzbild aus der zweiten Pokémon-TCG-Bilddatenbank'
-    : (usesFallbackImage ? 'Ersatzbild einer verknüpften Sprachversion' : '');
+  const hasCustomImageUrl = Boolean(variant?.customImageUrl);
+  const usesExternalImage = !hasCustomImage && !hasCustomImageUrl && Boolean(variant?.externalImageSmall || variant?.externalImageLarge);
+  const usesFallbackImage = !hasCustomImage && !hasCustomImageUrl && (variant?.imageBroken || !variant?.image) && variantImageSources(item, variant).length > 0;
+  const imageSourceNote = hasCustomImage
+    ? 'Eigenes Bild aus deiner Fotomediathek'
+    : (hasCustomImageUrl
+      ? 'Eigenes Bild über einen gespeicherten Link'
+      : (usesExternalImage
+        ? 'Ersatzbild aus der zweiten Pokémon-TCG-Bilddatenbank'
+        : (usesFallbackImage ? 'Ersatzbild einer verknüpften Sprachversion' : '')));
 
   main.innerHTML = `
     <section class="detail-hero">
@@ -1818,6 +1917,19 @@ function renderDetail() {
       <button class="secondary-button" data-refresh-item>↻ Preise laden</button>
       <button class="primary-button" data-move-item>${item.list === 'binder' ? 'Zur Wunschliste' : 'In den Binder'}</button>
     </div>
+
+    <section class="panel image-link-panel">
+      <div class="panel-title stacked-title">
+        <div><h3>Eigenes Kartenbild per Link</h3><p>Dieser Link hat Vorrang vor den automatischen Bildern.</p></div>
+        <span>${hasCustomImageUrl ? 'gespeichert' : 'optional'}</span>
+      </div>
+      <div class="custom-image-link-editor">
+        <input id="customImageUrl" data-custom-image-url value="${escapeHtml(variant?.customImageUrl || '')}" placeholder="https://…/kartenbild.jpg" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" />
+        <button class="primary-button" data-save-custom-image-url>Link testen & speichern</button>
+      </div>
+      ${hasCustomImageUrl ? '<button class="image-link-remove" data-remove-custom-image-url>Gespeicherten Bild-Link entfernen</button>' : ''}
+      <p class="image-link-help">Verwende einen direkten HTTPS-Bild-Link. Links zu normalen Webseiten können nicht als Kartenbild angezeigt werden. Wenn der Link später ausfällt, probiert BinderDex automatisch die übrigen Bildquellen.</p>
+    </section>
 
     <section class="panel">
       <div class="panel-title stacked-title">
@@ -1927,8 +2039,8 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Zwei unabhängige Bilddatenbanken, automatische Ersatzbilder und eigene Kartenfotos auf dem Gerät.</p></div>
-        <span class="version-badge">V6</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Automatische Ersatzbilder, eigene Kartenfotos und frei speicherbare Bild-Links pro Karte.</p></div>
+        <span class="version-badge">V7</span>
       </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
@@ -2458,11 +2570,13 @@ main.addEventListener('click', (event) => {
     if (!item) return;
     toast('Bild wird in beiden Datenbanken gesucht …');
     return recoverItemImage(item.id, item.sourceLanguage, false, true)
-      .then((found) => toast(found ? 'Kartenbild wurde gefunden.' : 'Kein automatisches Bild gefunden. Du kannst ein eigenes Bild wählen.'))
+      .then((found) => toast(found ? 'Kartenbild wurde gefunden.' : 'Kein automatisches Bild gefunden. Du kannst ein eigenes Foto oder einen Bild-Link verwenden.'))
       .catch((error) => { console.error(error); toast('Bildsuche fehlgeschlagen.'); });
   }
   if (target.closest('[data-choose-custom-image]')) return chooseCustomImage();
   if (target.closest('[data-remove-custom-image]')) return removeCustomImage();
+  if (target.closest('[data-save-custom-image-url]')) return saveCustomImageUrl();
+  if (target.closest('[data-remove-custom-image-url]')) return removeCustomImageUrl();
   if (target.closest('[data-refresh-item]')) {
     const item = getItem(state.selectedId);
     if (!item) return;
@@ -2526,6 +2640,13 @@ main.addEventListener('change', (event) => {
     state.data.settings.defaultAddLanguage = target.value;
     saveData();
     toast('Standardsprache gespeichert.');
+  }
+});
+
+main.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.target?.matches?.('[data-custom-image-url]')) {
+    event.preventDefault();
+    saveCustomImageUrl();
   }
 });
 
