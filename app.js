@@ -1,10 +1,12 @@
 'use strict';
 
 const API_BASE = 'https://api.tcgdex.net/v2';
-const STORAGE_KEY = 'binderdex-data-v5';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
+const SECONDARY_IMAGE_API_BASE = 'https://api.pokemontcg.io/v2';
+const SECONDARY_IMAGE_CDN = 'https://images.pokemontcg.io';
+const STORAGE_KEY = 'binderdex-data-v6';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '5.0.0';
+const APP_VERSION = '6.0.0';
 const IMAGE_DB_NAME = 'binderdex-image-store';
 const IMAGE_DB_VERSION = 1;
 const IMAGE_STORE_NAME = 'custom-images';
@@ -70,6 +72,7 @@ const cardCache = new Map();
 const setIndexCache = new Map();
 const customImageCache = new Map();
 const imageRecoveryQueue = new Set();
+const secondaryImageCache = new Map();
 const dragState = {
   timer: null,
   pointerId: null,
@@ -84,7 +87,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 5,
+    version: 6,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -105,6 +108,7 @@ function loadData() {
 
 function migrateData(input) {
   const base = defaultData();
+  const previousVersion = Number(input?.version) || 0;
   const collection = Array.isArray(input?.collection) ? input.collection : [];
   const usedSlots = new Set();
   let nextSlot = 0;
@@ -132,6 +136,22 @@ function migrateData(input) {
       variant.pricing = sanitizePricing(variant.pricing);
       variant.priceUpdated = variant.pricing?.cardmarket?.updated || variant.priceUpdated || null;
       variant.cardmarketSearch = cardmarketSearchTerms(variant);
+      variant.externalImageSmall = variant.externalImageSmall || variant.secondaryImageSmall || '';
+      variant.externalImageLarge = variant.externalImageLarge || variant.secondaryImageLarge || '';
+      variant.externalImageCardId = variant.externalImageCardId || '';
+      variant.externalImageSource = variant.externalImageSource || '';
+      variant.externalImageCheckedAt = variant.externalImageCheckedAt || null;
+      variant.externalImageBroken = Boolean(variant.externalImageBroken);
+      variant.secondaryDerivedBroken = Boolean(variant.secondaryDerivedBroken);
+      variant.imageRecoveryAttemptedAt = variant.imageRecoveryAttemptedAt || null;
+      // V5 konnte funktionierende URLs dauerhaft als defekt markieren. Beim
+      // ersten Start von V6 werden alle alten Markierungen einmal zurückgesetzt.
+      if (previousVersion < 6) {
+        variant.imageBroken = false;
+        variant.externalImageBroken = false;
+        variant.secondaryDerivedBroken = false;
+        variant.imageRecoveryAttemptedAt = null;
+      }
       if (!variant.cardmarketLink || variant.cardmarketLinkAuto !== false) {
         variant.cardmarketLink = buildCardmarketSearchLink(variant);
         variant.cardmarketLinkAuto = true;
@@ -166,11 +186,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 5, collection: migrated, settings };
+  return { version: 6, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 5;
+  state.data.version = 6;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -351,6 +371,18 @@ function imageCandidatesForSource(source, quality = 'low') {
   if (/^(?:data:|blob:)/i.test(value)) return [value];
 
   const clean = value.replace(/[?#].*$/, '');
+
+  // Die zweite Bildquelle liefert kleine Bilder als /123.png und große Bilder
+  // als /123_hires.png. Je nach Ansicht wird die passende Größe zuerst geladen.
+  const pokemonTcgMatch = clean.match(/^(https:\/\/images\.pokemontcg\.io\/[^/]+\/)(.+?)(?:_hires)?\.png$/i);
+  if (pokemonTcgMatch) {
+    const base = pokemonTcgMatch[1];
+    const number = pokemonTcgMatch[2];
+    const small = `${base}${number}.png`;
+    const large = `${base}${number}_hires.png`;
+    return quality === 'high' ? [large, small] : [small, large];
+  }
+
   const match = clean.match(/^(.*)\/(?:low|high)\.(webp|png|jpe?g)$/i);
   const hasImageExtension = /\.(webp|png|jpe?g)$/i.test(clean);
   const base = match ? match[1] : (hasImageExtension ? '' : clean.replace(/\/$/, ''));
@@ -358,19 +390,78 @@ function imageCandidatesForSource(source, quality = 'low') {
   const generated = base ? [
     `${base}/${quality}.webp`,
     `${base}/${quality}.png`,
+    `${base}/${quality}.jpg`,
     `${base}/${otherQuality}.webp`,
     `${base}/${otherQuality}.png`,
+    `${base}/${otherQuality}.jpg`,
   ] : [];
 
-  // Falls die API bereits eine vollständige URL liefert, wird diese zuerst
-  // probiert. Bei TCGdex-URLs werden zusätzlich alle Qualitäts-/Formatvarianten
-  // abgeleitet, damit Safari nicht an einer einzelnen Datei hängen bleibt.
   return base ? uniqueValues(generated) : (hasImageExtension ? [value] : []);
 }
 
 function imageCandidates(sources, quality = 'low') {
   const list = Array.isArray(sources) ? sources : [sources];
   return uniqueValues(list.flatMap((source) => imageCandidatesForSource(source, quality)));
+}
+
+
+const SECONDARY_SET_ID_OVERRIDES = Object.freeze({
+  'swsh3.5': 'swsh35',
+  'swsh4.5': 'swsh45',
+  'swsh12.5': 'swsh12pt5',
+  'sv01': 'sv1',
+  'sv02': 'sv2',
+  'sv03': 'sv3',
+  'sv03.5': 'sv3pt5',
+  'sv04': 'sv4',
+  'sv04.5': 'sv4pt5',
+  'sv05': 'sv5',
+  'sv06': 'sv6',
+  'sv06.5': 'sv6pt5',
+  'sv07': 'sv7',
+  'sv08': 'sv8',
+  'sv08.5': 'sv8pt5',
+  'sv09': 'sv9',
+  'sv10': 'sv10',
+});
+
+function secondarySetId(value = '') {
+  const clean = String(value).trim();
+  if (!clean) return '';
+  if (SECONDARY_SET_ID_OVERRIDES[clean]) return SECONDARY_SET_ID_OVERRIDES[clean];
+  const svHalf = clean.match(/^sv0?(\d+)\.5$/i);
+  if (svHalf) return `sv${Number(svHalf[1])}pt5`;
+  const svMain = clean.match(/^sv0?(\d+)$/i);
+  if (svMain) return `sv${Number(svMain[1])}`;
+  return clean;
+}
+
+function secondaryCardNumber(variant) {
+  return String(variant?.localId || '').split('/')[0].trim();
+}
+
+function secondaryDerivedImageSource(variant) {
+  if (!variant || variant.secondaryDerivedBroken) return '';
+  const setId = secondarySetId(variant.setId || setIdFromCardBrief(variant));
+  const rawNumber = secondaryCardNumber(variant);
+  const number = normalizeNumber(rawNumber) || rawNumber;
+  if (!setId || !number || /^(?:ja|jp)/i.test(setId)) return '';
+  return `${SECONDARY_IMAGE_CDN}/${encodeURIComponent(setId)}/${encodeURIComponent(number)}.png`;
+}
+
+function searchImageSources(card) {
+  const variantLike = {
+    setId: card?.set?.id || card?.setId || setIdFromCardBrief(card),
+    localId: card?.localId,
+    secondaryDerivedBroken: false,
+  };
+  return uniqueValues([
+    card?.image,
+    card?._fallbackImage,
+    card?._externalImageSmall,
+    card?._externalImageLarge,
+    secondaryDerivedImageSource(variantLike),
+  ]);
 }
 
 function customImageForItem(item, language) {
@@ -384,15 +475,22 @@ function variantImageSources(item, variant = null) {
   const english = item?.variants?.en;
   const source = item?.variants?.[item?.sourceLanguage];
   const other = item?.variants?.de || item?.variants?.ja;
+  const derivedVariant = english || selected;
   return uniqueValues([
     customImageForItem(item, language),
     selected?.imageBroken ? '' : selected?.image,
+    selected?.externalImageBroken ? '' : selected?.externalImageSmall,
+    selected?.externalImageBroken ? '' : selected?.externalImageLarge,
     selected?.fallbackImage,
-    selected !== source ? source?.image : '',
+    selected !== source && !source?.imageBroken ? source?.image : '',
+    selected !== source && !source?.externalImageBroken ? source?.externalImageSmall : '',
     selected !== source ? source?.fallbackImage : '',
-    selected !== english ? english?.image : '',
+    selected !== english && !english?.imageBroken ? english?.image : '',
+    selected !== english && !english?.externalImageBroken ? english?.externalImageSmall : '',
+    selected !== english && !english?.externalImageBroken ? english?.externalImageLarge : '',
     selected !== english ? english?.fallbackImage : '',
-    selected !== other ? other?.image : '',
+    secondaryDerivedImageSource(derivedVariant),
+    selected !== other && !other?.imageBroken ? other?.image : '',
   ]);
 }
 
@@ -412,7 +510,7 @@ function cardImageHtml(sources, alt, options = {}) {
   const itemId = options.itemId ? ` data-image-item-id="${escapeHtml(options.itemId)}"` : '';
   const language = options.language ? ` data-image-language="${escapeHtml(options.language)}"` : '';
   const searchCardId = options.searchCardId ? ` data-search-image-card-id="${escapeHtml(options.searchCardId)}"` : '';
-  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async" referrerpolicy="no-referrer"${draggable}${itemId}${language}${searchCardId} />`;
+  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async"${draggable}${itemId}${language}${searchCardId} />`;
 }
 
 function formatDate(value) {
@@ -600,7 +698,16 @@ function normalizeCard(card, language, previous = null) {
     image: card.image || previous?.image || '',
     fallbackImage: card.fallbackImage || card._fallbackImage || previous?.fallbackImage || '',
     fallbackImageLanguage: card.fallbackImageLanguage || card._fallbackImageLanguage || previous?.fallbackImageLanguage || '',
-    imageBroken: previous?.imageBroken || false,
+    imageBroken: card.image && card.image !== previous?.image ? false : Boolean(previous?.imageBroken),
+    externalImageSmall: card.externalImageSmall || card._externalImageSmall || previous?.externalImageSmall || '',
+    externalImageLarge: card.externalImageLarge || card._externalImageLarge || previous?.externalImageLarge || '',
+    externalImageCardId: card.externalImageCardId || card._externalImageCardId || previous?.externalImageCardId || '',
+    externalImageSource: card.externalImageSource || card._externalImageSource || previous?.externalImageSource || '',
+    externalImageCheckedAt: card.externalImageCheckedAt || previous?.externalImageCheckedAt || null,
+    externalImageBroken: Boolean(previous?.externalImageBroken),
+    secondaryDerivedBroken: Boolean(previous?.secondaryDerivedBroken),
+    imageRecoveryAttemptedAt: previous?.imageRecoveryAttemptedAt || null,
+    rejectedExternalImageCardId: previous?.rejectedExternalImageCardId || '',
     pricing,
     priceUpdated: pricing?.cardmarket?.updated || previous?.priceUpdated || null,
     cardmarketLink: previousManual || automaticLink,
@@ -870,7 +977,7 @@ function searchResultsHtml() {
 
   return `<div class="results-list">${state.searchResults.map((card) => `
     <button class="result-card" data-search-result="${escapeHtml(card.id)}">
-      ${cardImageHtml([card.image, card._fallbackImage], card.name, { quality: 'low', searchCardId: card.id, placeholder: '<div class="result-placeholder"></div>' })}
+      ${cardImageHtml(searchImageSources(card), card.name, { quality: 'low', searchCardId: card.id, placeholder: '<div class="result-placeholder"></div>' })}
       <div>
         <h3>${escapeHtml(card.name)}</h3>
         <p>${escapeHtml(card.set?.name || 'Set unbekannt')}</p>
@@ -1224,7 +1331,7 @@ function renderPreviewModal(card) {
         <button class="icon-button" data-close-modal aria-label="Schließen">×</button>
       </div>
       <div class="preview-layout">
-        ${cardImageHtml([card.image, card._fallbackImage], card.name, { quality: 'high', eager: true, searchCardId: card.id, placeholder: '<div class="preview-image-placeholder">Kein Bild</div>' })}
+        ${cardImageHtml(searchImageSources(card), card.name, { quality: 'high', eager: true, searchCardId: card.id, placeholder: '<div class="preview-image-placeholder">Kein Bild</div>' })}
         <div>
           <span class="preview-language">${escapeHtml(LANGS[state.searchLang].label)}</span>
           <h3>${escapeHtml(card.name)}</h3>
@@ -1249,6 +1356,114 @@ function renderPreviewModal(card) {
 
 function parsedModalCard() {
   try { return JSON.parse(modalRoot.dataset.card || '{}'); } catch { return null; }
+}
+
+
+function secondaryExactCardIds(variant) {
+  if (!variant) return [];
+  const setId = secondarySetId(variant.setId || setIdFromCardBrief(variant));
+  const number = secondaryCardNumber(variant);
+  const rawId = String(variant.cardId || variant.id || '').trim();
+  const normalizedNumber = normalizeNumber(number);
+  const mappedId = setId && number ? `${setId}-${number}` : '';
+  const normalizedId = setId && normalizedNumber ? `${setId}-${normalizedNumber}` : '';
+  return uniqueValues([mappedId, normalizedId, rawId]);
+}
+
+function secondaryImageResult(card) {
+  const small = String(card?.images?.small || '').trim();
+  const large = String(card?.images?.large || '').trim();
+  if (!small && !large) return null;
+  return {
+    cardId: String(card.id || ''),
+    small: small || large,
+    large: large || small,
+  };
+}
+
+function secondarySearchScore(candidate, references) {
+  let best = -999;
+  for (const ref of references) {
+    let score = 0;
+    const refSet = secondarySetId(ref?.setId || ref?.set?.id || setIdFromCardBrief(ref));
+    const candidateSet = String(candidate?.set?.id || '');
+    const refNumber = normalizeNumber(ref?.localId || ref?.number);
+    const candidateNumber = normalizeNumber(candidate?.number);
+    if (refSet && candidateSet === refSet) score += 100;
+    if (refNumber && candidateNumber === refNumber) score += 55;
+    if (ref?.name && normalizeText(candidate?.name) === normalizeText(ref.name)) score += 45;
+    const refArtist = normalizeText(ref?.illustrator);
+    if (refArtist && normalizeText(candidate?.artist) === refArtist) score += 35;
+    if (ref?.hp && candidate?.hp && Number(ref.hp) === Number(candidate.hp)) score += 8;
+    const refDex = new Set((ref?.dexId || []).map(String));
+    if (refDex.size && (candidate?.nationalPokedexNumbers || []).some((id) => refDex.has(String(id)))) score += 25;
+    best = Math.max(best, score);
+  }
+  return best;
+}
+
+function secondaryQueryValue(value) {
+  return `"${String(value).replace(/["\\]/g, '\\$&')}"`;
+}
+
+async function findSecondaryImage(references, rejectedCardId = '') {
+  const refs = references.filter(Boolean);
+  if (!refs.length) return null;
+  const cacheKey = refs.map((ref) => `${ref.cardId || ref.id || ''}:${ref.setId || ref.set?.id || ''}:${ref.localId || ref.number || ''}`).join('|');
+  if (secondaryImageCache.has(cacheKey)) return secondaryImageCache.get(cacheKey);
+
+  const promise = (async () => {
+    for (const ref of refs) {
+      for (const id of secondaryExactCardIds(ref)) {
+        try {
+          const payload = await fetchJson(`${SECONDARY_IMAGE_API_BASE}/cards/${encodeURIComponent(id)}?select=id,name,number,artist,nationalPokedexNumbers,hp,set,images`, { retries: 0, timeout: 9000, cache: 'no-store' });
+          const result = secondaryImageResult(payload?.data);
+          if (result && result.cardId !== rejectedCardId) return result;
+        } catch {
+          // Suche mit Set und Nummer folgt.
+        }
+      }
+    }
+
+    const queries = [];
+    for (const ref of refs) {
+      const setId = secondarySetId(ref?.setId || ref?.set?.id || setIdFromCardBrief(ref));
+      const number = secondaryCardNumber(ref) || String(ref?.number || '').trim();
+      const normalizedNumber = normalizeNumber(number);
+      if (setId && number) queries.push(`set.id:${secondaryQueryValue(setId)} number:${secondaryQueryValue(number)}`);
+      if (setId && normalizedNumber && normalizedNumber !== number) queries.push(`set.id:${secondaryQueryValue(setId)} number:${secondaryQueryValue(normalizedNumber)}`);
+      if (ref?.name && number) queries.push(`name:${secondaryQueryValue(ref.name)} number:${secondaryQueryValue(number)}`);
+    }
+
+    for (const query of uniqueValues(queries).slice(0, 3)) {
+      try {
+        const params = new URLSearchParams({
+          q: query,
+          page: '1',
+          pageSize: '30',
+          select: 'id,name,number,artist,nationalPokedexNumbers,hp,set,images',
+        });
+        const payload = await fetchJson(`${SECONDARY_IMAGE_API_BASE}/cards?${params.toString()}`, { retries: 0, timeout: 10000, cache: 'no-store' });
+        const ranked = (payload?.data || [])
+          .map((candidate) => ({ candidate, score: secondarySearchScore(candidate, refs) }))
+          .filter((entry) => entry.candidate?.id !== rejectedCardId)
+          .sort((a, b) => b.score - a.score);
+        if (ranked[0]?.score >= 100) {
+          const result = secondaryImageResult(ranked[0].candidate);
+          if (result) return result;
+        }
+      } catch {
+        // Die App bleibt auch bei Ausfall der zweiten Quelle verwendbar.
+      }
+    }
+    return null;
+  })().catch((error) => {
+    secondaryImageCache.delete(cacheKey);
+    throw error;
+  });
+
+  secondaryImageCache.set(cacheKey, promise);
+  return promise;
 }
 
 async function findEnglishCounterpart(card, sourceLanguage) {
@@ -1438,15 +1653,35 @@ async function removeCustomImage() {
   toast('Eigenes Kartenbild wurde entfernt.');
 }
 
-async function recoverItemImage(itemId, language, forceFallback = false) {
+async function recoverItemImage(itemId, language, forceFallback = false, ignoreCooldown = false) {
   const queueKey = `${itemId}:${language}`;
   if (imageRecoveryQueue.has(queueKey) || !navigator.onLine) return false;
   const item = getItem(itemId);
   let variant = item?.variants?.[language] || sourceVariant(item);
   if (!item || !variant?.cardId) return false;
+
+  const lastAttempt = variant.imageRecoveryAttemptedAt ? new Date(variant.imageRecoveryAttemptedAt).getTime() : 0;
+  if (!ignoreCooldown && lastAttempt && Date.now() - lastAttempt < 6 * 60 * 60 * 1000) return false;
+
   imageRecoveryQueue.add(queueKey);
   let changed = false;
   try {
+    variant.imageRecoveryAttemptedAt = new Date().toISOString();
+    changed = true;
+
+    // Wenn der Browser alle angebotenen URLs abgelehnt hat, werden genau diese
+    // Kandidaten nicht endlos erneut probiert.
+    if (forceFallback) {
+      variant.imageBroken = Boolean(variant.image);
+      variant.secondaryDerivedBroken = true;
+      if (variant.externalImageSmall || variant.externalImageLarge) {
+        variant.rejectedExternalImageCardId = variant.externalImageCardId || '';
+        variant.externalImageSmall = '';
+        variant.externalImageLarge = '';
+        variant.externalImageBroken = true;
+      }
+    }
+
     let sourceCard = null;
     try {
       sourceCard = await fetchJson(`${API_BASE}/${language}/cards/${encodeURIComponent(variant.cardId)}`, { cache: 'no-store', retries: 1 });
@@ -1456,31 +1691,47 @@ async function recoverItemImage(itemId, language, forceFallback = false) {
         item.variants[language] = fresh;
         variant = fresh;
         changed = true;
-      } else {
-        variant.imageBroken = Boolean(forceFallback);
       }
     } catch {
-      variant.imageBroken = Boolean(forceFallback);
+      // Die zweite Quelle wird darunter versucht.
     }
 
-    if (!variant.image || forceFallback || variant.imageBroken) {
-      const source = sourceCard || variant;
-      let english = item.variants?.en;
-      if (!english?.image) {
-        try {
-          const found = await findEnglishCounterpart(source, language);
-          if (found) {
-            english = normalizeCard(found, 'en', english);
-            item.variants.en = english;
-            changed = true;
-          }
-        } catch {
-          // Eigenes Bild bleibt als letzte, zuverlässige Option verfügbar.
+    const source = sourceCard || variant;
+    let english = item.variants?.en;
+    if (!english || (!english.image && !english.externalImageSmall)) {
+      try {
+        const found = await findEnglishCounterpart(source, language);
+        if (found) {
+          english = normalizeCard(found, 'en', english);
+          item.variants.en = english;
+          changed = true;
         }
+      } catch {
+        // Unabhängige Bildquelle folgt.
       }
-      if (english?.image && variant.fallbackImage !== english.image) {
-        variant.fallbackImage = english.image;
-        variant.fallbackImageLanguage = 'en';
+    }
+
+    if (english?.image && variant.fallbackImage !== english.image) {
+      variant.fallbackImage = english.image;
+      variant.fallbackImageLanguage = 'en';
+      changed = true;
+    }
+
+    // Unabhängiger Fallback: Pokémon TCG API / images.pokemontcg.io.
+    // Die englische Vergleichskarte hat Vorrang, weil ihre Set-ID und Nummer
+    // am zuverlässigsten mit dieser Bilddatenbank übereinstimmen.
+    if (!variant.externalImageSmall || forceFallback || variant.externalImageBroken) {
+      const result = await findSecondaryImage([english, source, variant], variant.rejectedExternalImageCardId || '');
+      variant.externalImageCheckedAt = new Date().toISOString();
+      if (result) {
+        variant.externalImageSmall = result.small;
+        variant.externalImageLarge = result.large;
+        variant.externalImageCardId = result.cardId;
+        variant.externalImageSource = 'pokemontcg.io';
+        variant.externalImageBroken = false;
+        // Ein von der API bestätigter Treffer darf wieder geladen werden, auch
+        // wenn ein zuvor nur erratener Direktpfad gescheitert ist.
+        variant.secondaryDerivedBroken = true;
         changed = true;
       }
     }
@@ -1491,7 +1742,10 @@ async function recoverItemImage(itemId, language, forceFallback = false) {
       else if (state.route === 'binder') renderBinder();
       else if (state.route === 'wishlist') renderWishlist();
     }
-    return changed;
+    return Boolean(variant.image && !variant.imageBroken)
+      || Boolean(variant.fallbackImage)
+      || Boolean(variant.externalImageSmall && !variant.externalImageBroken)
+      || Boolean(customImageForItem(item, language));
   } finally {
     imageRecoveryQueue.delete(queueKey);
   }
@@ -1501,7 +1755,7 @@ function queueVisibleImageRepairs() {
   if (!navigator.onLine) return;
   const placeholders = [...main.querySelectorAll('[data-image-placeholder-only="true"]')].slice(0, 6);
   placeholders.forEach((element) => {
-    recoverItemImage(element.dataset.imageItemId, element.dataset.imageLanguage, false)
+    recoverItemImage(element.dataset.imageItemId, element.dataset.imageLanguage, false, false)
       .catch((error) => console.warn('Automatische Bildreparatur fehlgeschlagen.', error));
   });
 }
@@ -1513,11 +1767,11 @@ async function repairAllImages() {
   let repaired = 0;
   for (let index = 0; index < items.length; index += 3) {
     const batch = items.slice(index, index + 3);
-    const settled = await Promise.allSettled(batch.map((item) => recoverItemImage(item.id, item.sourceLanguage, false)));
+    const settled = await Promise.allSettled(batch.map((item) => recoverItemImage(item.id, item.sourceLanguage, false, true)));
     repaired += settled.filter((entry) => entry.status === 'fulfilled' && entry.value).length;
   }
   render();
-  toast(repaired ? `${repaired} Kartenbilder wurden ergänzt.` : 'Keine weiteren Datenbankbilder gefunden. Nutze bei Bedarf „Eigenes Bild wählen“.');
+  toast(repaired ? `${repaired} Kartenbilder wurden ergänzt.` : 'Keine weiteren Bilder in beiden Datenbanken gefunden. Nutze bei Bedarf „Eigenes Bild wählen“.');
 }
 
 function renderDetail() {
@@ -1531,17 +1785,22 @@ function renderDetail() {
   const sourceLanguage = item.sourceLanguage || variant?.language || 'de';
   const compareLanguages = sourceLanguage === 'en' ? ['en'] : [sourceLanguage, 'en'];
   const hasCustomImage = Boolean(customImageForItem(item, sourceLanguage));
-  const usesFallbackImage = !hasCustomImage && !variant?.image && variantImageSources(item, variant).length > 0;
+  const usesExternalImage = !hasCustomImage && Boolean(variant?.externalImageSmall || variant?.externalImageLarge);
+  const usesFallbackImage = !hasCustomImage && (variant?.imageBroken || !variant?.image) && variantImageSources(item, variant).length > 0;
+  const imageSourceNote = usesExternalImage
+    ? 'Ersatzbild aus der zweiten Pokémon-TCG-Bilddatenbank'
+    : (usesFallbackImage ? 'Ersatzbild einer verknüpften Sprachversion' : '');
 
   main.innerHTML = `
     <section class="detail-hero">
       <div class="detail-art">
         ${cardImageHtml(variantImageSources(item, variant), variant?.name, { quality: 'high', eager: true, itemId: item.id, language: sourceLanguage, placeholder: '<div class="detail-image-placeholder">Kein Bild</div>' })}
         <div class="image-action-row">
+          <button class="image-action-button" data-repair-current-image>Bild erneut suchen</button>
           <button class="image-action-button" data-choose-custom-image>Eigenes Bild wählen</button>
           ${hasCustomImage ? '<button class="image-action-button subtle" data-remove-custom-image>Eigenes Bild entfernen</button>' : ''}
         </div>
-        ${usesFallbackImage ? '<p class="image-source-note">Ersatzbild einer verknüpften Sprachversion</p>' : ''}
+        ${imageSourceNote ? `<p class="image-source-note">${imageSourceNote}</p>` : ''}
       </div>
       <div class="detail-main">
         <span class="source-pill">Deine Karte · ${escapeHtml(LANGS[sourceLanguage]?.label || sourceLanguage)}</span>
@@ -1668,8 +1927,8 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Bild-Update: stabilere Ladewege, englische Ersatzbilder und eigene Kartenfotos auf dem Gerät.</p></div>
-        <span class="version-badge">V5</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Zwei unabhängige Bilddatenbanken, automatische Ersatzbilder und eigene Kartenfotos auf dem Gerät.</p></div>
+        <span class="version-badge">V6</span>
       </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
@@ -1694,8 +1953,8 @@ function renderSettings() {
 
       <section class="settings-card">
         <h3>Bilder reparieren</h3>
-        <p>Prüft fehlende Scans erneut und verwendet nach Möglichkeit das passende englische Kartenbild. In den Kartendetails kannst du zusätzlich ein eigenes Foto speichern.</p>
-        <button class="primary-button full-button" data-repair-images>Alle Bilder neu prüfen</button>
+        <p>Prüft TCGdex und zusätzlich die Pokémon-TCG-Bilddatenbank. Alte Defektmarkierungen aus V5 werden beim Update zurückgesetzt.</p>
+        <button class="primary-button full-button" data-repair-images>Alle Bilder in beiden Quellen prüfen</button>
       </section>
 
       <section class="settings-card">
@@ -2194,6 +2453,14 @@ main.addEventListener('click', (event) => {
   if (openLink) return openCardmarket(openLink.dataset.openCardmarket);
   const saveLink = target.closest('[data-save-cardmarket]');
   if (saveLink) return saveCardmarketLink(saveLink.dataset.saveCardmarket);
+  if (target.closest('[data-repair-current-image]')) {
+    const item = getItem(state.selectedId);
+    if (!item) return;
+    toast('Bild wird in beiden Datenbanken gesucht …');
+    return recoverItemImage(item.id, item.sourceLanguage, false, true)
+      .then((found) => toast(found ? 'Kartenbild wurde gefunden.' : 'Kein automatisches Bild gefunden. Du kannst ein eigenes Bild wählen.'))
+      .catch((error) => { console.error(error); toast('Bildsuche fehlgeschlagen.'); });
+  }
   if (target.closest('[data-choose-custom-image]')) return chooseCustomImage();
   if (target.closest('[data-remove-custom-image]')) return removeCustomImage();
   if (target.closest('[data-refresh-item]')) {
@@ -2310,7 +2577,7 @@ document.addEventListener('error', (event) => {
   image.classList.add('image-failed');
   image.src = './icons/card-placeholder.svg';
   if (image.dataset.imageItemId && image.dataset.imageLanguage) {
-    recoverItemImage(image.dataset.imageItemId, image.dataset.imageLanguage, true)
+    recoverItemImage(image.dataset.imageItemId, image.dataset.imageLanguage, true, true)
       .catch((error) => console.warn('Bild-Fallback konnte nicht geladen werden.', error));
   }
 }, true);

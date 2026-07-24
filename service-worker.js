@@ -1,12 +1,12 @@
-const CACHE_VERSION = 'binderdex-v5.0.0';
+const CACHE_VERSION = 'binderdex-v6.0.0';
 const APP_CACHE = `${CACHE_VERSION}-app`;
 const API_CACHE = `${CACHE_VERSION}-api`;
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=5.0.0',
-  './app.js?v=5.0.0',
-  './manifest.json?v=5.0.0',
+  './styles.css?v=6.0.0',
+  './app.js?v=6.0.0',
+  './manifest.json?v=6.0.0',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -40,9 +40,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Kartenbilder werden bewusst direkt vom Browser geladen. Safari verwaltet
-  // seinen nativen Bildcache zuverlässiger als ein zusätzlicher PWA-Proxy.
-  if (url.hostname === 'assets.tcgdex.net') return;
+  if (url.hostname === 'api.pokemontcg.io') {
+    event.respondWith(networkFirst(request, API_CACHE, 10000));
+    return;
+  }
+
+  // Beide Kartenbild-CDNs werden direkt von Safari geladen. So greifen der
+  // native Bildcache und die automatischen URL-Fallbacks ohne PWA-Proxy.
+  if (url.hostname === 'assets.tcgdex.net' || url.hostname === 'images.pokemontcg.io') return;
 
   if (url.origin === self.location.origin) {
     if (request.mode === 'navigate') {
