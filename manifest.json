@@ -1,9 +1,9 @@
 {
   "name": "BinderDex – Kartenbinder",
   "short_name": "BinderDex",
-  "description": "Privater Pokémon-Kartenbinder mit deutscher Suche für japanische Karten und eigenen Bild-Links.",
+  "description": "Privater Pokémon-Kartenbinder mit Flohmarktmodus, Tauschliste, Statistik und japanischen Cardmarket-NM-Preisen.",
   "lang": "de-DE",
-  "start_url": "./?v=8.0.0",
+  "start_url": "./?v=9.0.0",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",

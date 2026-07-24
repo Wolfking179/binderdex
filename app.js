@@ -3,10 +3,10 @@
 const API_BASE = 'https://api.tcgdex.net/v2';
 const SECONDARY_IMAGE_API_BASE = 'https://api.pokemontcg.io/v2';
 const SECONDARY_IMAGE_CDN = 'https://images.pokemontcg.io';
-const STORAGE_KEY = 'binderdex-data-v8';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v7', 'binderdex-data-v6', 'binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
+const STORAGE_KEY = 'binderdex-data-v9';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v8', 'binderdex-data-v7', 'binderdex-data-v6', 'binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '8.0.0';
+const APP_VERSION = '9.0.0';
 const IMAGE_DB_NAME = 'binderdex-image-store';
 const IMAGE_DB_VERSION = 1;
 const IMAGE_STORE_NAME = 'custom-images';
@@ -68,6 +68,8 @@ const state = {
   binderPage: 0,
   binderArrange: false,
   selectedMoveId: null,
+  marketTab: 'sale',
+  detailReturnRoute: null,
   data: loadData(),
 };
 
@@ -94,7 +96,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 8,
+    version: 9,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -153,6 +155,21 @@ function migrateData(input) {
       variant.imageRecoveryAttemptedAt = variant.imageRecoveryAttemptedAt || null;
       variant.customImageUrl = String(variant.customImageUrl || '').trim();
       variant.customImageUrlUpdatedAt = variant.customImageUrlUpdatedAt || null;
+      variant.japaneseNmManualPrice = positivePrice(variant.japaneseNmManualPrice);
+      if (variant.japaneseNmPricing && typeof variant.japaneseNmPricing === 'object') {
+        const jpLow = positivePrice(variant.japaneseNmPricing.low);
+        const jpAvg5 = positivePrice(variant.japaneseNmPricing.avg5);
+        variant.japaneseNmPricing = (jpLow || jpAvg5) ? {
+          low: jpLow,
+          avg5: jpAvg5,
+          updated: variant.japaneseNmPricing.updated || null,
+          sourceUrl: variant.japaneseNmPricing.sourceUrl || '',
+          source: variant.japaneseNmPricing.source || 'cardmarket-jp-nm',
+        } : null;
+      } else {
+        variant.japaneseNmPricing = null;
+      }
+      variant.japaneseNmLastError = String(variant.japaneseNmLastError || '');
       // V5 konnte funktionierende URLs dauerhaft als defekt markieren. Beim
       // ersten Start ab V6 werden alle alten Markierungen einmal zurückgesetzt.
       if (previousVersion < 6) {
@@ -175,15 +192,25 @@ function migrateData(input) {
 
     return {
       id: rawItem.id || uid(),
-      list: rawItem.list === 'wishlist' ? 'wishlist' : 'binder',
+      list: rawItem.list === 'wishlist' ? 'wishlist' : rawItem.list === 'sold' ? 'sold' : 'binder',
       title: rawItem.title || variants[firstLanguage]?.name || 'Karte',
       sourceLanguage: firstLanguage,
       variants,
       binderSlot,
-      quantity: Math.max(1, Number(rawItem.quantity) || 1),
+      quantity: rawItem.list === 'sold' ? Math.max(0, Number(rawItem.quantity) || 0) : Math.max(1, Number(rawItem.quantity) || 1),
       condition: rawItem.condition || 'NM',
       finish: rawItem.finish || 'normal',
       purchasePrice: rawItem.purchasePrice ?? '',
+      forSale: Boolean(rawItem.forSale),
+      askingPrice: rawItem.askingPrice ?? '',
+      tradeAvailable: Boolean(rawItem.tradeAvailable),
+      sales: Array.isArray(rawItem.sales) ? rawItem.sales.map((sale) => ({
+        id: sale.id || uid(),
+        quantity: Math.max(1, Number(sale.quantity) || 1),
+        pricePerCard: positivePrice(sale.pricePerCard) || 0,
+        date: sale.date || new Date().toISOString().slice(0, 10),
+        createdAt: sale.createdAt || new Date().toISOString(),
+      })).filter((sale) => sale.pricePerCard > 0) : [],
       notes: rawItem.notes || '',
       createdAt: rawItem.createdAt || new Date().toISOString(),
     };
@@ -195,11 +222,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 8, collection: migrated, settings };
+  return { version: 9, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 8;
+  state.data.version = 9;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -328,6 +355,51 @@ function money(value) {
   const number = positivePrice(value);
   if (number === null) return '–';
   return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(number);
+}
+
+function japaneseNmLow(variant) {
+  return positivePrice(variant?.japaneseNmManualPrice)
+    ?? positivePrice(variant?.japaneseNmPricing?.low);
+}
+
+function japaneseNmAverage(variant) {
+  return positivePrice(variant?.japaneseNmManualPrice)
+    ?? positivePrice(variant?.japaneseNmPricing?.avg5)
+    ?? positivePrice(variant?.japaneseNmPricing?.low);
+}
+
+function hasJapaneseNmPrice(variant) {
+  return japaneseNmLow(variant) !== null;
+}
+
+function itemQuantity(item) {
+  const number = Number(item?.quantity);
+  return Number.isFinite(number) ? Math.max(0, number) : 0;
+}
+
+function salesRevenue(item) {
+  return (item?.sales || []).reduce((sum, sale) => sum + (positivePrice(sale.pricePerCard) || 0) * Math.max(1, Number(sale.quantity) || 1), 0);
+}
+
+function salesProfit(item) {
+  const purchase = positivePrice(item?.purchasePrice) || 0;
+  return (item?.sales || []).reduce((sum, sale) => {
+    const quantity = Math.max(1, Number(sale.quantity) || 1);
+    return sum + ((positivePrice(sale.pricePerCard) || 0) - purchase) * quantity;
+  }, 0);
+}
+
+function moneyTotal(value) {
+  const number = Number(value);
+  const safe = Number.isFinite(number) && number >= 0 ? number : 0;
+  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(safe);
+}
+
+function signedMoney(value) {
+  const number = Number(value) || 0;
+  const formatted = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Math.abs(number));
+  if (Math.abs(number) < 0.0001) return formatted;
+  return `${number > 0 ? '+' : '−'}${formatted}`;
 }
 
 function sanitizeCardmarketMarket(market) {
@@ -642,6 +714,16 @@ function priceKey(item, key) {
 }
 
 function variantPrice(item, variant, key = 'trend') {
+  if (!variant) return null;
+  // Japanische Karten verwenden ausschließlich den Cardmarket-Preis der
+  // gefilterten japanischen NM-Angebote. TCGdex- oder EN-Ersatzwerte würden
+  // verschiedene Druckausgaben vermischen und sind deshalb hier deaktiviert.
+  if (variant.language === 'ja') {
+    if (key === 'low') return japaneseNmLow(variant);
+    if (key === 'trend') return japaneseNmLow(variant);
+    if (key === 'avg7' || key === 'avg30') return japaneseNmAverage(variant);
+    return japaneseNmLow(variant);
+  }
   const market = variant?.pricing?.cardmarket;
   if (!market) return null;
   const foilPreferred = ['holo', 'reverse'].includes(item.finish);
@@ -669,23 +751,24 @@ function variantPrice(item, variant, key = 'trend') {
 }
 
 function hasMarketPrice(variant) {
+  if (variant?.language === 'ja') return hasJapaneseNmPrice(variant);
   return marketHasPositivePrice(variant?.pricing?.cardmarket);
 }
 
 function bestPriceVariant(item, preferred = null) {
+  if (item?.sourceLanguage === 'ja') return item?.variants?.ja || preferred || null;
   const candidates = [
     preferred,
     item?.variants?.[item?.sourceLanguage],
     item?.variants?.en,
     item?.variants?.de,
-    item?.variants?.ja,
   ].filter(Boolean);
   return candidates.find(hasMarketPrice) || preferred || candidates[0] || null;
 }
 
 function itemValue(item) {
   const price = variantPrice(item, bestPriceVariant(item, sourceVariant(item)), 'trend');
-  return price === null ? 0 : price * Math.max(1, Number(item.quantity) || 1);
+  return price === null ? 0 : price * itemQuantity(item);
 }
 
 function binderItems() {
@@ -696,6 +779,18 @@ function binderItems() {
 
 function wishlistItems() {
   return state.data.collection.filter((item) => item.list === 'wishlist');
+}
+
+function soldItems() {
+  return state.data.collection.filter((item) => item.list === 'sold');
+}
+
+function tradeItems() {
+  return binderItems().filter((item) => item.tradeAvailable);
+}
+
+function saleItems() {
+  return binderItems().filter((item) => item.forSale);
 }
 
 function firstFreeBinderSlot() {
@@ -758,6 +853,112 @@ function buildCardmarketWebSearchLink(card, fallbackCard = null) {
   return `https://www.google.com/search?q=${encodeURIComponent(`site:cardmarket.com/de/Pokemon/Products/Singles ${exact}`)}`;
 }
 
+function cardmarketJapaneseNmLink(variant, fallbackCard = null) {
+  const raw = variant?.cardmarketLinkAuto === false
+    ? variant?.cardmarketLink
+    : buildCardmarketSearchLink(variant, fallbackCard);
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (!/(^|\.)cardmarket\.com$/i.test(url.hostname)) return raw;
+    url.searchParams.set('language', '7');
+    url.searchParams.set('minCondition', '2');
+    return url.href;
+  } catch {
+    return raw;
+  }
+}
+
+function isDirectCardmarketProductLink(value = '') {
+  try {
+    const url = new URL(value);
+    return /(^|\.)cardmarket\.com$/i.test(url.hostname)
+      && /\/Pokemon\/Products\/Singles\//i.test(url.pathname)
+      && !/\/Products\/Search/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function euroNumber(value = '') {
+  const clean = String(value).replace(/\s/g, '').replace(/\.(?=\d{3}(?:\D|$))/g, '').replace(',', '.');
+  return positivePrice(clean);
+}
+
+function parseCardmarketJapaneseNmText(text = '') {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const offerValues = [];
+  const summaryValues = [];
+  const euroRegex = /(\d{1,6}(?:[.\s]\d{3})*[,.]\d{2})\s*€/g;
+  for (const line of lines) {
+    const values = [...line.matchAll(euroRegex)].map((match) => euroNumber(match[1])).filter(Boolean);
+    if (!values.length) continue;
+    if (/\b(?:NM|Near\s*Mint|MT|Mint)\b/i.test(line)) offerValues.push(...values);
+    if (/\b(?:ab|from|starting\s+at)\b/i.test(line)) summaryValues.push(...values);
+  }
+  let values = offerValues.length ? offerValues : summaryValues;
+  // Einheitspreis und Gesamtpreis stehen bei Menge 1 oft doppelt nebeneinander.
+  values = values.filter((value) => value > 0 && value < 100000);
+  values = values.filter((value, index) => index === 0 || Math.abs(value - values[index - 1]) > 0.0001);
+  values.sort((a, b) => a - b);
+  if (!values.length) return null;
+  const cheapest = values.slice(0, 5);
+  return {
+    low: cheapest[0],
+    avg5: cheapest.reduce((sum, value) => sum + value, 0) / cheapest.length,
+    count: cheapest.length,
+  };
+}
+
+function cardmarketReaderUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `https://r.jina.ai/${parsed.protocol}//${parsed.host}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return '';
+  }
+}
+
+async function refreshJapaneseNmPrice(item, options = {}) {
+  const variant = item?.variants?.ja;
+  if (!variant) throw new Error('Keine japanische Karte verknüpft.');
+  const filteredUrl = cardmarketJapaneseNmLink(variant, item.variants?.en);
+  if (!isDirectCardmarketProductLink(filteredUrl)) {
+    variant.japaneseNmLastError = 'Bitte zuerst den direkten Cardmarket-Produktlink speichern.';
+    if (!options.silent) saveData();
+    throw new Error(variant.japaneseNmLastError);
+  }
+  const readerUrl = cardmarketReaderUrl(filteredUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 18000);
+  try {
+    const response = await fetch(readerUrl, {
+      signal: controller.signal,
+      headers: { Accept: 'text/plain' },
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Preisquelle antwortet mit HTTP ${response.status}.`);
+    const parsed = parseCardmarketJapaneseNmText(await response.text());
+    if (!parsed) throw new Error('Auf der gefilterten Seite wurden keine japanischen NM-Angebote erkannt.');
+    variant.japaneseNmPricing = {
+      low: parsed.low,
+      avg5: parsed.avg5,
+      updated: new Date().toISOString(),
+      sourceUrl: filteredUrl,
+      source: 'cardmarket-jp-nm-reader',
+    };
+    variant.japaneseNmLastError = '';
+    saveData();
+    return parsed;
+  } catch (error) {
+    variant.japaneseNmLastError = error.message || 'JP-NM-Preis konnte nicht geladen werden.';
+    saveData();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizeCard(card, language, previous = null) {
   const automaticLink = buildCardmarketSearchLink(card);
   const previousManual = previous && previous.cardmarketLinkAuto === false && previous.cardmarketLink;
@@ -798,6 +999,9 @@ function normalizeCard(card, language, previous = null) {
     cardmarketLink: previousManual || automaticLink,
     cardmarketLinkAuto: !previousManual,
     cardmarketSearch: cardmarketSearchTerms(card),
+    japaneseNmPricing: previous?.japaneseNmPricing || null,
+    japaneseNmManualPrice: positivePrice(previous?.japaneseNmManualPrice),
+    japaneseNmLastError: previous?.japaneseNmLastError || '',
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -807,6 +1011,8 @@ function titleForRoute() {
   if (state.route === 'wishlist') return 'Wunschliste';
   if (state.route === 'search') return state.attachContext ? 'Vergleichskarte wählen' : 'Karte hinzufügen';
   if (state.route === 'settings') return 'Mehr';
+  if (state.route === 'market') return 'Flohmarkt';
+  if (state.route === 'stats') return 'Statistik';
   return 'Mein Binder';
 }
 
@@ -829,16 +1035,19 @@ function render() {
   const isDetail = state.route === 'detail';
   backButton.classList.toggle('hidden', !isDetail);
   bottomNav.classList.toggle('hidden', isDetail);
-  syncButton.classList.toggle('hidden', state.route === 'settings' || state.route === 'search');
+  syncButton.classList.toggle('hidden', ['settings', 'search', 'stats'].includes(state.route));
 
+  const navRoute = ['market', 'stats'].includes(state.route) ? 'settings' : state.route;
   document.querySelectorAll('.nav-item').forEach((button) => {
-    button.classList.toggle('active', button.dataset.route === state.route);
+    button.classList.toggle('active', button.dataset.route === navRoute);
   });
 
   if (state.route === 'binder') renderBinder();
   else if (state.route === 'wishlist') renderWishlist();
   else if (state.route === 'search') renderSearch();
   else if (state.route === 'settings') renderSettings();
+  else if (state.route === 'market') renderMarket();
+  else if (state.route === 'stats') renderStats();
   else if (state.route === 'detail') renderDetail();
   requestAnimationFrame(queueVisibleImageRepairs);
 }
@@ -860,7 +1069,7 @@ function renderBinder() {
   const pageStart = state.binderPage * PAGE_SIZE;
   const bySlot = new Map(items.map((item) => [item.binderSlot, item]));
   const totalValue = items.reduce((sum, item) => sum + itemValue(item), 0);
-  const quantity = items.reduce((sum, item) => sum + Math.max(1, Number(item.quantity) || 1), 0);
+  const quantity = items.reduce((sum, item) => sum + itemQuantity(item), 0);
 
   main.innerHTML = `
     <section class="binder-summary">
@@ -989,6 +1198,99 @@ function collectionCardHtml(item) {
         <div class="card-price-row"><strong>${money(trend)}</strong><span>${usesEnglishPrice ? 'EN-Referenz' : 'Trend'}</span></div>
       </div>
     </button>
+  `;
+}
+
+function marketItemCardHtml(item, tab) {
+  const variant = sourceVariant(item);
+  const marketPrice = variantPrice(item, bestPriceVariant(item, variant), 'trend');
+  const asking = positivePrice(item.askingPrice);
+  const lastSale = (item.sales || []).at(-1);
+  const displayPrice = tab === 'sold' ? positivePrice(lastSale?.pricePerCard) : (asking || marketPrice);
+  return `
+    <article class="market-card">
+      <button class="market-card-main" data-open-card="${escapeHtml(item.id)}">
+        ${cardImageHtml(variantImageSources(item, variant), item.title, { quality: 'low', itemId: item.id, language: item.sourceLanguage, placeholder: '<div class="market-image-placeholder">Kein Bild</div>' })}
+        <div class="market-card-copy">
+          <span>${escapeHtml(LANGS[item.sourceLanguage]?.short || '–')} · ${escapeHtml(variant?.setId || '–')} · #${escapeHtml(variant?.localId || '–')}</span>
+          <h3>${escapeHtml(item.title)}</h3>
+          <strong>${money(displayPrice)}</strong>
+          <small>${tab === 'sold' ? 'letzter Verkauf pro Karte' : asking ? 'dein Flohmarktpreis' : 'Marktreferenz'}</small>
+        </div>
+      </button>
+      ${tab === 'sale' ? `
+        <div class="market-quick-actions">
+          <button data-market-qty="-1" data-item-id="${escapeHtml(item.id)}" aria-label="Menge verringern">−</button>
+          <span><b>${itemQuantity(item)}</b><small>Stück</small></span>
+          <button data-market-qty="1" data-item-id="${escapeHtml(item.id)}" aria-label="Menge erhöhen">＋</button>
+          <button class="market-sold-button" data-market-sale="${escapeHtml(item.id)}" ${asking ? '' : 'disabled'}>1 verkauft</button>
+        </div>
+      ` : tab === 'trade' ? `
+        <div class="trade-ready-row"><span>Tauschbereit</span><button data-open-card="${escapeHtml(item.id)}">Details</button></div>
+      ` : `
+        <div class="sold-summary-row"><span>${(item.sales || []).reduce((sum, sale) => sum + Math.max(1, Number(sale.quantity) || 1), 0)} verkauft</span><strong>${moneyTotal(salesRevenue(item))}</strong></div>
+      `}
+    </article>
+  `;
+}
+
+function renderMarket() {
+  const tabs = { sale: 'Verkaufen', trade: 'Tauschen', sold: 'Verkauft' };
+  const items = state.marketTab === 'trade' ? tradeItems() : state.marketTab === 'sold' ? soldItems() : saleItems();
+  const revenue = state.data.collection.reduce((sum, item) => sum + salesRevenue(item), 0);
+  const forSaleValue = saleItems().reduce((sum, item) => sum + (positivePrice(item.askingPrice) || 0) * itemQuantity(item), 0);
+  main.innerHTML = `
+    <section class="market-hero">
+      <div><span>Geplante Verkaufssumme</span><strong>${moneyTotal(forSaleValue)}</strong></div>
+      <div><span>Bisher eingenommen</span><strong>${moneyTotal(revenue)}</strong></div>
+    </section>
+    <div class="segmented market-tabs" aria-label="Flohmarkt-Modus">
+      ${Object.entries(tabs).map(([key, label]) => `<button data-market-tab="${key}" class="${state.marketTab === key ? 'active' : ''}">${label}</button>`).join('')}
+    </div>
+    ${items.length ? `<section class="market-list">${items.map((item) => marketItemCardHtml(item, state.marketTab)).join('')}</section>` : `
+      <section class="empty-state small"><h2>${state.marketTab === 'sale' ? 'Keine Verkaufskarten' : state.marketTab === 'trade' ? 'Keine Tauschkarten' : 'Noch keine Verkäufe'}</h2><p>Markiere Karten in der Detailansicht als ${state.marketTab === 'trade' ? 'tauschbar' : 'zum Verkauf'}.</p></section>
+    `}
+  `;
+}
+
+function renderStats() {
+  const current = binderItems();
+  const currentValue = current.reduce((sum, item) => sum + itemValue(item), 0);
+  const investment = current.reduce((sum, item) => sum + (positivePrice(item.purchasePrice) || 0) * itemQuantity(item), 0);
+  const revenue = state.data.collection.reduce((sum, item) => sum + salesRevenue(item), 0);
+  const realizedProfit = state.data.collection.reduce((sum, item) => sum + salesProfit(item), 0);
+  const counts = current.reduce((result, item) => {
+    result[item.sourceLanguage] = (result[item.sourceLanguage] || 0) + itemQuantity(item);
+    return result;
+  }, { de: 0, ja: 0, en: 0 });
+  const top = [...current].sort((a, b) => itemValue(b) - itemValue(a)).slice(0, 5);
+  const totalCards = current.reduce((sum, item) => sum + itemQuantity(item), 0);
+  main.innerHTML = `
+    <section class="stats-grid">
+      <article><span>Sammlungswert</span><strong>${moneyTotal(currentValue)}</strong></article>
+      <article><span>Kaufkosten</span><strong>${moneyTotal(investment)}</strong></article>
+      <article><span>Unrealisierter Unterschied</span><strong>${signedMoney(currentValue - investment)}</strong></article>
+      <article><span>Verkaufserlös</span><strong>${moneyTotal(revenue)}</strong></article>
+      <article><span>Realisierter Gewinn/Verlust</span><strong>${signedMoney(realizedProfit)}</strong></article>
+      <article><span>Karten im Binder</span><strong>${totalCards}</strong></article>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h3>Sprachen</h3><span>aktuelle Sammlung</span></div>
+      <div class="language-stats">
+        <div><span>DE</span><strong>${counts.de}</strong></div>
+        <div><span>JP</span><strong>${counts.ja}</strong></div>
+        <div><span>EN</span><strong>${counts.en}</strong></div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h3>Wertvollste Karten</h3><span>nach aktuellem Stückwert</span></div>
+      <div class="top-card-list">
+        ${top.length ? top.map((item, index) => {
+          const variant = sourceVariant(item);
+          return `<button data-open-card="${escapeHtml(item.id)}"><span>${index + 1}</span><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(variant?.setId || '–')} · #${escapeHtml(variant?.localId || '–')}</small></div><b>${money(variantPrice(item, bestPriceVariant(item, variant), 'trend'))}</b></button>`;
+        }).join('') : '<p class="muted-copy">Noch keine Karten im Binder.</p>'}
+      </div>
+    </section>
   `;
 }
 
@@ -1441,7 +1743,7 @@ async function openSearchPreview(cardId) {
 
 function renderPreviewModal(card) {
   const market = sanitizeCardmarketMarket(card.pricing?.cardmarket);
-  const trend = firstPositiveMarketPrice(market, [
+  const trend = state.searchLang === 'ja' ? null : firstPositiveMarketPrice(market, [
     'trend', 'avg7', 'avg30', 'avg', 'avg1', 'low',
     'trend-holo', 'avg7-holo', 'avg30-holo', 'avg-holo', 'avg1-holo', 'low-holo',
   ]);
@@ -1460,7 +1762,7 @@ function renderPreviewModal(card) {
           <h3>${escapeHtml(card.name)}</h3>
           <p>${escapeHtml(card.set?.name || 'Set unbekannt')}</p>
           <p><strong>${escapeHtml(card.set?.id || '–')}</strong> · Kartennummer ${escapeHtml(card.localId || '–')}</p>
-          <strong class="preview-price">${money(trend)} Trend</strong>
+          <strong class="preview-price">${state.searchLang === 'ja' ? 'JP · NM nach dem Speichern laden' : `${money(trend)} Trend`}</strong>
         </div>
       </div>
       ${!attach && state.searchLang !== 'en' ? '<p class="modal-note">Beim Hinzufügen sucht BinderDex automatisch nach der passenden englischen Ausgabe für den Preisvergleich.</p>' : ''}
@@ -1660,6 +1962,10 @@ async function addCard(card, list) {
     condition: 'NM',
     finish: card.variants?.normal === false && card.variants?.holo ? 'holo' : 'normal',
     purchasePrice: '',
+    forSale: false,
+    askingPrice: '',
+    tradeAvailable: false,
+    sales: [],
     notes: '',
     createdAt: new Date().toISOString(),
   };
@@ -2053,7 +2359,7 @@ function renderDetail() {
 
     <div class="detail-actions">
       <button class="secondary-button" data-refresh-item>↻ Preise laden</button>
-      <button class="primary-button" data-move-item>${item.list === 'binder' ? 'Zur Wunschliste' : 'In den Binder'}</button>
+      <button class="primary-button" data-move-item>${item.list === 'binder' ? 'Zur Wunschliste' : item.list === 'sold' ? 'Zurück in den Binder' : 'In den Binder'}</button>
     </div>
 
     <section class="panel image-link-panel">
@@ -2083,13 +2389,39 @@ function renderDetail() {
     <section class="panel">
       <div class="panel-title"><h3>Deine Angaben</h3><span>nur auf diesem Gerät</span></div>
       <div class="field-grid">
-        <div class="field"><label for="quantity">Menge</label><input id="quantity" data-item-field="quantity" type="number" min="1" inputmode="numeric" value="${escapeHtml(item.quantity)}" /></div>
+        <div class="field"><label for="quantity">Menge</label><input id="quantity" data-item-field="quantity" type="number" min="${item.list === 'sold' ? '0' : '1'}" inputmode="numeric" value="${escapeHtml(item.quantity)}" /></div>
         <div class="field"><label for="condition">Zustand</label><select id="condition" data-item-field="condition">${['MT','NM','EX','GD','LP','PL','PO'].map((condition) => `<option ${item.condition === condition ? 'selected' : ''}>${condition}</option>`).join('')}</select></div>
         <div class="field"><label for="finish">Variante</label><select id="finish" data-item-field="finish"><option value="normal" ${item.finish === 'normal' ? 'selected' : ''}>Normal</option><option value="reverse" ${item.finish === 'reverse' ? 'selected' : ''}>Reverse Holo</option><option value="holo" ${item.finish === 'holo' ? 'selected' : ''}>Holo / Foil</option></select></div>
         <div class="field"><label for="purchasePrice">Kaufpreis (€)</label><input id="purchasePrice" data-item-field="purchasePrice" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(item.purchasePrice)}" placeholder="0,00" /></div>
       </div>
       <div class="field"><label for="itemTitle">Eigener Titel</label><input id="itemTitle" data-item-field="title" value="${escapeHtml(item.title)}" /></div>
       <div class="field"><label for="notes">Notizen</label><textarea id="notes" data-item-field="notes" placeholder="z. B. Flohmarkt Köln, kleine Macke hinten …">${escapeHtml(item.notes)}</textarea></div>
+    </section>
+
+    <section class="panel commerce-panel">
+      <div class="panel-title stacked-title"><div><h3>Verkaufen & Tauschen</h3><p>Für deine Flohmarkt-Schnellansicht</p></div><span>${(item.sales || []).length} Verkäufe</span></div>
+      <div class="commerce-switches">
+        <label><input type="checkbox" data-item-field="forSale" ${item.forSale ? 'checked' : ''} /><span><strong>Zum Verkauf</strong><small>In der Flohmarktansicht anzeigen</small></span></label>
+        <label><input type="checkbox" data-item-field="tradeAvailable" ${item.tradeAvailable ? 'checked' : ''} /><span><strong>Tauschbar</strong><small>In die Tauschliste aufnehmen</small></span></label>
+      </div>
+      <div class="field-grid commerce-price-grid">
+        <div class="field"><label for="askingPrice">Flohmarktpreis pro Karte (€)</label><input id="askingPrice" data-item-field="askingPrice" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(item.askingPrice)}" placeholder="0,00" /></div>
+        <div class="field"><label>Aktuelle Marktreferenz</label><div class="read-only-value">${money(variantPrice(item, bestPriceVariant(item, variant), 'trend'))}</div></div>
+      </div>
+      ${item.list !== 'sold' ? `
+        <div class="sale-entry-grid">
+          <div class="field"><label for="saleQuantity">Verkaufte Menge</label><input id="saleQuantity" type="number" min="1" max="${Math.max(1, itemQuantity(item))}" value="1" inputmode="numeric" /></div>
+          <div class="field"><label for="salePrice">Preis pro Karte (€)</label><input id="salePrice" type="number" min="0" step="0.01" value="${escapeHtml(positivePrice(item.askingPrice) || '')}" inputmode="decimal" placeholder="0,00" /></div>
+          <div class="field"><label for="saleDate">Datum</label><input id="saleDate" type="date" value="${new Date().toISOString().slice(0,10)}" /></div>
+          <button class="primary-button" data-record-sale>Verkauf verbuchen</button>
+        </div>
+      ` : '<p class="sold-out-note">Dieser Eintrag ist vollständig verkauft. Über „Zurück in den Binder“ kannst du ihn wieder aktivieren.</p>'}
+      ${(item.sales || []).length ? `
+        <div class="sales-history">
+          ${(item.sales || []).slice().reverse().map((sale) => `<div><span>${escapeHtml(sale.date)} · ${sale.quantity}× ${money(sale.pricePerCard)}</span><strong>${money(sale.quantity * sale.pricePerCard)}</strong><button data-remove-sale="${escapeHtml(sale.id)}" aria-label="Verkauf rückgängig machen">↶</button></div>`).join('')}
+          <p>Umsatz ${moneyTotal(salesRevenue(item))} · Gewinn/Verlust ${signedMoney(salesProfit(item))}</p>
+        </div>
+      ` : ''}
     </section>
 
     <section class="panel">
@@ -2108,65 +2440,59 @@ function languagePriceCardHtml(item, code, role) {
     return `
       <article class="language-price-card missing">
         <div class="language-price-head"><span class="language-flag">${escapeHtml(LANGS[code].short)}</span><div><strong>${escapeHtml(LANGS[code].label)}</strong><small>${escapeHtml(role)}</small></div></div>
-        <div class="missing-price">
-          <strong>Nicht automatisch gefunden</strong>
-          <p>Wähle die passende Ausgabe manuell aus.</p>
-          <button class="primary-button full-button" data-attach-lang="${code}">${escapeHtml(label)}</button>
-        </div>
+        <div class="missing-price"><strong>Nicht automatisch gefunden</strong><p>Wähle die passende Ausgabe manuell aus.</p><button class="primary-button full-button" data-attach-lang="${code}">${escapeHtml(label)}</button></div>
       </article>
     `;
   }
 
-  const englishFallback = code !== 'en' && !hasMarketPrice(variant) && hasMarketPrice(item.variants?.en)
-    ? item.variants.en
-    : null;
+  const nameFallback = code !== 'en' ? item.variants?.en : null;
+  const automaticLink = buildCardmarketSearchLink(variant, nameFallback);
+  const link = variant.cardmarketLinkAuto === false ? variant.cardmarketLink : automaticLink;
+  const webSearch = buildCardmarketWebSearchLink(variant, nameFallback);
+
+  if (code === 'ja') {
+    const low = japaneseNmLow(variant);
+    const manual = positivePrice(variant.japaneseNmManualPrice);
+    const avg5 = manual || positivePrice(variant.japaneseNmPricing?.avg5);
+    const filteredLink = cardmarketJapaneseNmLink(variant, nameFallback);
+    const direct = isDirectCardmarketProductLink(filteredLink);
+    return `
+      <article class="language-price-card japanese-market-card">
+        <div class="language-price-head"><span class="language-flag jp">JP</span><div><strong>Japanisch · NM</strong><small>Deine japanische Karte</small></div></div>
+        ${low ? `
+          <div class="price-main-card"><strong>${money(low)}</strong><span>${manual ? 'Manuell festgelegter JP-NM-Preis' : 'Günstigstes erkanntes JP-NM-Angebot'}</span></div>
+          <div class="price-mini-grid two"><div><span>Ø günstigste 5</span><strong>${money(avg5)}</strong></div><div><span>Filter</span><strong>JP · NM+</strong></div></div>
+        ` : `<div class="missing-price compact-missing"><strong>Noch kein JP-NM-Preis</strong><p>Speichere den direkten Produktlink und lade den gefilterten Preis oder trage ihn manuell ein.</p></div>`}
+        <p class="price-date">Aktualisiert: ${escapeHtml(formatDate(variant.japaneseNmPricing?.updated || variant.fetchedAt))}</p>
+        <label class="link-label" for="cardmarket-ja">Direkter Cardmarket-Produktlink</label>
+        <div class="link-editor"><input id="cardmarket-ja" data-cardmarket-link="ja" value="${escapeHtml(link)}" placeholder="https://www.cardmarket.com/…/Products/Singles/…" inputmode="url" autocapitalize="off" /><button class="link-button" data-open-cardmarket="ja" ${link ? '' : 'disabled'} aria-label="Cardmarket JP NM öffnen"><svg viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></button></div>
+        <div class="smart-link-actions"><button class="save-link-button" data-save-cardmarket="ja">Link speichern</button><a class="exact-search-link" href="${escapeHtml(webSearch)}" target="_blank" rel="noopener">Produktseite suchen</a></div>
+        <div class="jp-price-actions">
+          <button class="primary-button full-button" data-refresh-jp-nm ${direct ? '' : 'disabled'}>JP-NM-Preis von Cardmarket laden</button>
+          <p>${direct ? 'Die App liest bestmöglich die mit Japanisch und Near Mint gefilterte Produktseite.' : 'Für die automatische Abfrage wird ein direkter Cardmarket-Produktlink benötigt.'}</p>
+        </div>
+        <div class="manual-price-editor"><input id="jpNmManualPrice" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(manual || '')}" placeholder="JP-NM-Preis manuell" /><button data-save-jp-nm-manual>Speichern</button>${manual ? '<button data-remove-jp-nm-manual>Auto nutzen</button>' : ''}</div>
+        ${variant.japaneseNmLastError ? `<p class="price-fallback-note error-note">${escapeHtml(variant.japaneseNmLastError)}</p>` : ''}
+      </article>
+    `;
+  }
+
+  const englishFallback = code === 'de' && !hasMarketPrice(variant) && hasMarketPrice(item.variants?.en) ? item.variants.en : null;
   const priceVariant = englishFallback || variant;
   const trend = variantPrice(item, priceVariant, 'trend');
   const low = variantPrice(item, priceVariant, 'low');
   const avg7 = variantPrice(item, priceVariant, 'avg7');
   const avg30 = variantPrice(item, priceVariant, 'avg30');
-  const nameFallback = code !== 'en' ? item.variants?.en : null;
-  const automaticLink = buildCardmarketSearchLink(variant, nameFallback);
-  const link = variant.cardmarketLinkAuto === false ? variant.cardmarketLink : automaticLink;
-  const webSearch = buildCardmarketWebSearchLink(variant, nameFallback);
   const missingPrices = [trend, low, avg7, avg30].every((value) => value === null);
-
   return `
     <article class="language-price-card">
-      <div class="language-price-head">
-        <span class="language-flag">${escapeHtml(LANGS[code].short)}</span>
-        <div><strong>${escapeHtml(LANGS[code].label)}</strong><small>${escapeHtml(role)}</small></div>
-        ${code === 'en' && item.sourceLanguage !== 'en' ? `<button class="mini-action" data-replace-lang="en">Ändern</button>` : ''}
-      </div>
-      ${missingPrices ? `
-        <div class="missing-price compact-missing">
-          <strong>Kein Marktpreis verfügbar</strong>
-          <p>TCGdex liefert für diese Ausgabe derzeit keine Cardmarket-Preisdaten.</p>
-        </div>
-      ` : `
-        <div class="price-main-card">
-          <strong>${money(trend)}</strong>
-          <span>${englishFallback ? 'Englischer Referenzpreis' : 'Trendpreis'}</span>
-        </div>
-        <div class="price-mini-grid">
-          <div><span>Niedrig</span><strong>${money(low)}</strong></div>
-          <div><span>7 Tage</span><strong>${money(avg7)}</strong></div>
-          <div><span>30 Tage</span><strong>${money(avg30)}</strong></div>
-        </div>
-      `}
-      ${englishFallback ? '<p class="price-fallback-note">Für diese Sprachversion fehlen Daten. Angezeigt wird ersatzweise die verknüpfte englische Ausgabe.</p>' : ''}
+      <div class="language-price-head"><span class="language-flag">${escapeHtml(LANGS[code].short)}</span><div><strong>${escapeHtml(LANGS[code].label)}</strong><small>${escapeHtml(role)}</small></div>${code === 'en' && item.sourceLanguage !== 'en' ? `<button class="mini-action" data-replace-lang="en">Ändern</button>` : ''}</div>
+      ${missingPrices ? `<div class="missing-price compact-missing"><strong>Kein Marktpreis verfügbar</strong><p>TCGdex liefert für diese Ausgabe derzeit keine Cardmarket-Preisdaten.</p></div>` : `<div class="price-main-card"><strong>${money(trend)}</strong><span>${englishFallback ? 'Englischer Referenzpreis' : 'Trendpreis'}</span></div><div class="price-mini-grid"><div><span>Niedrig</span><strong>${money(low)}</strong></div><div><span>7 Tage</span><strong>${money(avg7)}</strong></div><div><span>30 Tage</span><strong>${money(avg30)}</strong></div></div>`}
+      ${englishFallback ? '<p class="price-fallback-note">Für Deutsch fehlen Daten. Angezeigt wird ersatzweise die verknüpfte englische Ausgabe.</p>' : ''}
       <p class="price-date">Aktualisiert: ${escapeHtml(formatDate(priceVariant.priceUpdated || priceVariant.fetchedAt))}</p>
       <label class="link-label" for="cardmarket-${code}">Cardmarket-Link ${variant.cardmarketLinkAuto ? `(automatisch: ${escapeHtml(variant.cardmarketSearch || cardmarketSearchTerms(variant))})` : '(manuell)'}</label>
-      <div class="link-editor">
-        <input id="cardmarket-${code}" data-cardmarket-link="${code}" value="${escapeHtml(link)}" placeholder="Cardmarket-Link" inputmode="url" autocapitalize="off" />
-        <button class="link-button" data-open-cardmarket="${code}" ${link ? '' : 'disabled'} aria-label="Cardmarket öffnen">
-          <svg viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
-        </button>
-      </div>
-      <div class="smart-link-actions">
-        <button class="save-link-button" data-save-cardmarket="${code}">Link speichern</button>
-        <a class="exact-search-link" href="${escapeHtml(webSearch)}" target="_blank" rel="noopener">Exakten Treffer suchen</a>
-      </div>
+      <div class="link-editor"><input id="cardmarket-${code}" data-cardmarket-link="${code}" value="${escapeHtml(link)}" placeholder="Cardmarket-Link" inputmode="url" autocapitalize="off" /><button class="link-button" data-open-cardmarket="${code}" ${link ? '' : 'disabled'} aria-label="Cardmarket öffnen"><svg viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></button></div>
+      <div class="smart-link-actions"><button class="save-link-button" data-save-cardmarket="${code}">Link speichern</button><a class="exact-search-link" href="${escapeHtml(webSearch)}" target="_blank" rel="noopener">Exakten Treffer suchen</a></div>
     </article>
   `;
 }
@@ -2177,9 +2503,21 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Cardmarket-Bildproxy, deutsche Namenssuche für japanische Karten und klarer Sprachwechsel.</p></div>
-        <span class="version-badge">V8</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Flohmarktmodus, Tauschliste, Statistik und japanische Cardmarket-NM-Preise.</p></div>
+        <span class="version-badge">V9</span>
       </section>
+      <section class="settings-card feature-launch-card">
+        <h3>Flohmarkt & Tauschliste</h3>
+        <p>Große Verkaufspreise, schnelle Mengenänderung, Verkaufsbuchungen und deine tauschbaren Karten.</p>
+        <button class="primary-button full-button" data-open-route="market">Flohmarktmodus öffnen</button>
+      </section>
+
+      <section class="settings-card feature-launch-card">
+        <h3>Sammlungsstatistik</h3>
+        <p>Wert, Kaufkosten, Gewinn/Verlust, Verkaufserlöse, Sprachverteilung und wertvollste Karten.</p>
+        <button class="secondary-button full-button" data-open-route="stats">Statistik öffnen</button>
+      </section>
+
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
         <p>Neue Karten können auf Deutsch oder Japanisch angelegt werden. Englisch wird automatisch als Vergleich gesucht.</p>
@@ -2197,7 +2535,7 @@ function renderSettings() {
 
       <section class="settings-card">
         <h3>Preise reparieren</h3>
-        <p>Lädt fehlende deutsche, japanische und englische Vergleichspreise erneut und verwirft alte Nullwerte.</p>
+        <p>Lädt deutsche und englische Marktdaten sowie – bei direktem Produktlink – den japanischen Cardmarket-NM-Preis erneut.</p>
         <button class="primary-button full-button" data-repair-prices>Alle Preise neu prüfen</button>
       </section>
 
@@ -2228,7 +2566,7 @@ function renderSettings() {
         <button class="danger-button full-button" data-clear-all>Alle Daten löschen</button>
       </section>
 
-      <p class="disclaimer">BinderDex ist ein privates, inoffizielles Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company oder Cardmarket. Kartenbilder und Marktdaten werden über TCGdex bereitgestellt.</p>
+      <p class="disclaimer">BinderDex ist ein privates, inoffizielles Sammlerprojekt und steht nicht in Verbindung mit Nintendo, The Pokémon Company oder Cardmarket. Deutsche/englische Marktdaten stammen von TCGdex; japanische NM-Werte werden bestmöglich aus einer gefilterten Cardmarket-Produktseite gelesen oder manuell gepflegt.</p>
     </div>
   `;
 }
@@ -2269,6 +2607,15 @@ async function refreshItem(item) {
     }
   }
 
+  if (item.sourceLanguage === 'ja' && item.variants?.ja) {
+    try {
+      await refreshJapaneseNmPrice(item, { silent: true });
+      successful += 1;
+    } catch {
+      // Direkter Produktlink oder manuelle Eingabe bleibt als Fallback verfügbar.
+    }
+  }
+
   const sourceVariantData = item.variants?.[item.sourceLanguage];
   const englishVariant = item.variants?.en;
   if (sourceVariantData && !sourceVariantData.image && englishVariant?.image) {
@@ -2284,8 +2631,8 @@ async function repairMissingPricesOnce() {
   if (!navigator.onLine || state.data.settings.priceRepairVersion === APP_VERSION) return;
   const targets = state.data.collection.filter((item) => {
     const source = sourceVariant(item);
-    const sourceMissing = !hasMarketPrice(source);
-    const englishMissing = item.sourceLanguage !== 'en' && !hasMarketPrice(item.variants?.en);
+    const sourceMissing = item.sourceLanguage === 'ja' ? !hasJapaneseNmPrice(item.variants?.ja) : !hasMarketPrice(source);
+    const englishMissing = item.sourceLanguage === 'de' && !hasMarketPrice(item.variants?.en);
     return sourceMissing || englishMissing;
   });
 
@@ -2327,7 +2674,8 @@ async function syncAllPrices(list = null) {
 function updateItemField(field, value) {
   const item = getItem(state.selectedId);
   if (!item) return;
-  if (field === 'quantity') item[field] = Math.max(1, Number(value) || 1);
+  if (field === 'quantity') item[field] = item.list === 'sold' ? Math.max(0, Number(value) || 0) : Math.max(1, Number(value) || 1);
+  else if (['forSale', 'tradeAvailable'].includes(field)) item[field] = Boolean(value);
   else item[field] = value;
   saveData();
   if (field === 'finish') renderDetail();
@@ -2338,6 +2686,7 @@ function updateCardmarketLink(language, value) {
   if (!item?.variants?.[language]) return;
   item.variants[language].cardmarketLink = value.trim();
   item.variants[language].cardmarketLinkAuto = false;
+  if (language === 'ja') { item.variants[language].japaneseNmPricing = null; item.variants[language].japaneseNmLastError = ''; }
   saveData();
   const button = main.querySelector(`[data-open-cardmarket="${language}"]`);
   if (button) button.disabled = !value.trim();
@@ -2347,14 +2696,16 @@ function saveCardmarketLink(language) {
   const input = main.querySelector(`[data-cardmarket-link="${language}"]`);
   if (!input) return;
   updateCardmarketLink(language, input.value);
+  if (language === 'ja') renderDetail();
   toast('Cardmarket-Link wurde gespeichert.');
 }
 
 function openCardmarket(language) {
   const item = getItem(state.selectedId);
   const input = main.querySelector(`[data-cardmarket-link="${language}"]`);
-  const link = input?.value?.trim() || item?.variants?.[language]?.cardmarketLink?.trim();
+  let link = input?.value?.trim() || item?.variants?.[language]?.cardmarketLink?.trim();
   if (!link) return;
+  if (language === 'ja') link = cardmarketJapaneseNmLink({ ...item.variants.ja, cardmarketLink: link, cardmarketLinkAuto: false }, item.variants?.en);
   try {
     const url = new URL(link);
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Ungültige URL');
@@ -2377,6 +2728,102 @@ function beginAttach(language = 'en') {
   if (state.searchQuery.length >= 2) performSearch(state.searchQuery);
 }
 
+function saveJapaneseNmManualPrice() {
+  const item = getItem(state.selectedId);
+  const variant = item?.variants?.ja;
+  const input = document.getElementById('jpNmManualPrice');
+  const value = positivePrice(input?.value);
+  if (!variant || value === null) return toast('Bitte einen positiven JP-NM-Preis eingeben.');
+  variant.japaneseNmManualPrice = value;
+  variant.japaneseNmLastError = '';
+  saveData();
+  renderDetail();
+  toast('Manueller japanischer NM-Preis gespeichert.');
+}
+
+function removeJapaneseNmManualPrice() {
+  const item = getItem(state.selectedId);
+  if (!item?.variants?.ja) return;
+  item.variants.ja.japaneseNmManualPrice = null;
+  saveData();
+  renderDetail();
+  toast('Automatischer JP-NM-Preis wird wieder verwendet.');
+}
+
+async function refreshCurrentJapaneseNmPrice() {
+  const item = getItem(state.selectedId);
+  if (!item) return;
+  toast('Japanische NM-Angebote werden geprüft …');
+  try {
+    await refreshJapaneseNmPrice(item);
+    renderDetail();
+    toast('JP-NM-Preis wurde aktualisiert.');
+  } catch (error) {
+    renderDetail();
+    toast(error.message || 'JP-NM-Preis konnte nicht geladen werden.');
+  }
+}
+
+function recordSale(item, quantity, pricePerCard, date) {
+  const available = itemQuantity(item);
+  const soldQuantity = Math.max(1, Math.min(available || 1, Number(quantity) || 1));
+  const price = positivePrice(pricePerCard);
+  if (price === null) throw new Error('Bitte einen positiven Verkaufspreis eingeben.');
+  item.sales = Array.isArray(item.sales) ? item.sales : [];
+  item.sales.push({ id: uid(), quantity: soldQuantity, pricePerCard: price, date: date || new Date().toISOString().slice(0, 10), createdAt: new Date().toISOString() });
+  item.quantity = Math.max(0, available - soldQuantity);
+  if (item.quantity <= 0) {
+    item.list = 'sold';
+    item.binderSlot = null;
+    item.forSale = false;
+  }
+}
+
+function recordSaleFromDetail() {
+  const item = getItem(state.selectedId);
+  if (!item || item.list === 'sold') return;
+  try {
+    recordSale(item, document.getElementById('saleQuantity')?.value, document.getElementById('salePrice')?.value, document.getElementById('saleDate')?.value);
+    saveData();
+    renderDetail();
+    toast(item.list === 'sold' ? 'Verkauf verbucht – Karte ist vollständig verkauft.' : 'Verkauf wurde verbucht.');
+  } catch (error) { toast(error.message); }
+}
+
+function removeSale(saleId) {
+  const item = getItem(state.selectedId);
+  const sale = item?.sales?.find((entry) => entry.id === saleId);
+  if (!item || !sale) return;
+  item.sales = item.sales.filter((entry) => entry.id !== saleId);
+  item.quantity = itemQuantity(item) + Math.max(1, Number(sale.quantity) || 1);
+  if (item.list === 'sold') {
+    item.list = 'binder';
+    item.binderSlot = firstFreeBinderSlot();
+  }
+  saveData();
+  renderDetail();
+  toast('Verkauf wurde rückgängig gemacht.');
+}
+
+function adjustMarketQuantity(itemId, delta) {
+  const item = getItem(itemId);
+  if (!item || item.list !== 'binder') return;
+  item.quantity = Math.max(1, itemQuantity(item) + Number(delta || 0));
+  saveData();
+  renderMarket();
+}
+
+function quickMarketSale(itemId) {
+  const item = getItem(itemId);
+  const price = positivePrice(item?.askingPrice);
+  if (!item || price === null) return toast('Lege zuerst in den Details einen Flohmarktpreis fest.');
+  if (!confirm(`1× „${item.title}“ für ${money(price)} als verkauft verbuchen?`)) return;
+  recordSale(item, 1, price, new Date().toISOString().slice(0, 10));
+  saveData();
+  renderMarket();
+  toast('Verkauf verbucht.');
+}
+
 function moveItemBetweenLists() {
   const item = getItem(state.selectedId);
   if (!item) return;
@@ -2385,6 +2832,7 @@ function moveItemBetweenLists() {
     item.binderSlot = null;
   } else {
     item.list = 'binder';
+    item.quantity = Math.max(1, itemQuantity(item));
     item.binderSlot = firstFreeBinderSlot();
     state.binderPage = Math.floor(item.binderSlot / PAGE_SIZE);
   }
@@ -2415,7 +2863,7 @@ async function deleteItem() {
   state.data.collection = state.data.collection.filter((entry) => entry.id !== item.id);
   saveData();
   toast('Eintrag gelöscht.');
-  navigate(item.list);
+  navigate(item.list === 'sold' ? 'market' : item.list);
 }
 
 function changeBinderPage(deltaOrIndex, absolute = false) {
@@ -2595,7 +3043,9 @@ bottomNav.addEventListener('click', (event) => {
 
 backButton.addEventListener('click', () => {
   const item = getItem(state.selectedId);
-  navigate(item?.list || 'binder');
+  const destination = state.detailReturnRoute || (item?.list === 'sold' ? 'market' : (item?.list || 'binder'));
+  state.detailReturnRoute = null;
+  navigate(destination);
 });
 
 syncButton.addEventListener('click', () => {
@@ -2607,7 +3057,7 @@ syncButton.addEventListener('click', () => {
       .then(() => { saveData(); renderDetail(); toast('Preise aktualisiert.'); })
       .catch(() => toast('Aktualisierung fehlgeschlagen.'));
   } else {
-    syncAllPrices(state.route === 'wishlist' ? 'wishlist' : 'binder');
+    syncAllPrices(state.route === 'wishlist' ? 'wishlist' : state.route === 'binder' ? 'binder' : null);
   }
 });
 
@@ -2618,6 +3068,14 @@ main.addEventListener('click', (event) => {
   const routeButton = target.closest('[data-empty-route]');
   if (routeButton) return navigate(routeButton.dataset.emptyRoute);
   if (target.closest('[data-go-search]')) return navigate('search');
+  const openRoute = target.closest('[data-open-route]');
+  if (openRoute) return navigate(openRoute.dataset.openRoute);
+  const marketTab = target.closest('[data-market-tab]');
+  if (marketTab) { state.marketTab = marketTab.dataset.marketTab; return renderMarket(); }
+  const marketQty = target.closest('[data-market-qty]');
+  if (marketQty) return adjustMarketQuantity(marketQty.dataset.itemId, marketQty.dataset.marketQty);
+  const marketSale = target.closest('[data-market-sale]');
+  if (marketSale) return quickMarketSale(marketSale.dataset.marketSale);
 
   if (target.closest('[data-binder-prev]')) return changeBinderPage(-1);
   if (target.closest('[data-binder-next]')) return changeBinderPage(1);
@@ -2634,7 +3092,7 @@ main.addEventListener('click', (event) => {
     const itemId = pocket.dataset.slotItem;
     const slot = Number(pocket.dataset.binderSlot);
     if (!state.binderArrange) {
-      if (itemId) navigate('detail', itemId);
+      if (itemId) { state.detailReturnRoute = null; navigate('detail', itemId); }
       else navigate('search');
       return;
     }
@@ -2653,7 +3111,10 @@ main.addEventListener('click', (event) => {
   }
 
   const openCard = target.closest('[data-open-card]');
-  if (openCard) return navigate('detail', openCard.dataset.openCard);
+  if (openCard) {
+    state.detailReturnRoute = ['market', 'stats'].includes(state.route) ? state.route : null;
+    return navigate('detail', openCard.dataset.openCard);
+  }
   if (target.closest('[data-sync-list]')) return syncAllPrices('wishlist');
 
   const searchLang = target.closest('[data-search-lang]');
@@ -2707,6 +3168,9 @@ main.addEventListener('click', (event) => {
   if (openLink) return openCardmarket(openLink.dataset.openCardmarket);
   const saveLink = target.closest('[data-save-cardmarket]');
   if (saveLink) return saveCardmarketLink(saveLink.dataset.saveCardmarket);
+  if (target.closest('[data-refresh-jp-nm]')) return refreshCurrentJapaneseNmPrice();
+  if (target.closest('[data-save-jp-nm-manual]')) return saveJapaneseNmManualPrice();
+  if (target.closest('[data-remove-jp-nm-manual]')) return removeJapaneseNmManualPrice();
   if (target.closest('[data-repair-current-image]')) {
     const item = getItem(state.selectedId);
     if (!item) return;
@@ -2727,6 +3191,9 @@ main.addEventListener('click', (event) => {
       .then(() => { saveData(); renderDetail(); toast('Preise aktualisiert.'); })
       .catch(() => toast('Aktualisierung fehlgeschlagen.'));
   }
+  if (target.closest('[data-record-sale]')) return recordSaleFromDetail();
+  const removeSaleButton = target.closest('[data-remove-sale]');
+  if (removeSaleButton) return removeSale(removeSaleButton.dataset.removeSale);
   if (target.closest('[data-move-item]')) return moveItemBetweenLists();
   if (target.closest('[data-delete-item]')) return deleteItem();
   if (target.closest('[data-export-single]')) return exportSingle();
@@ -2772,12 +3239,12 @@ main.addEventListener('input', (event) => {
     if (results) results.innerHTML = wishlistResultsHtml();
     return;
   }
-  if (target.matches('[data-item-field]')) updateItemField(target.dataset.itemField, target.value);
+  if (target.matches('[data-item-field]')) updateItemField(target.dataset.itemField, target.type === 'checkbox' ? target.checked : target.value);
 });
 
 main.addEventListener('change', (event) => {
   const target = event.target;
-  if (target.matches('[data-item-field]')) updateItemField(target.dataset.itemField, target.value);
+  if (target.matches('[data-item-field]')) updateItemField(target.dataset.itemField, target.type === 'checkbox' ? target.checked : target.value);
   if (target.id === 'defaultAddLanguage') {
     state.data.settings.defaultAddLanguage = target.value;
     saveData();

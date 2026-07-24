@@ -534,3 +534,68 @@ img.image-failed { object-fit: contain !important; background: rgba(255,255,255,
 
 /* V8: der aktive Sprachreiter muss auf dem iPhone sofort eindeutig erkennbar sein. */
 .api-note #searchLanguageNote { display: block; }
+
+
+/* V9 – Flohmarkt, Tauschliste und Statistik */
+.market-hero { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:4px 0 12px; }
+.market-hero div { padding:14px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(145deg,rgba(255,211,78,.12),rgba(255,255,255,.04)); }
+.market-hero span { display:block; color:var(--muted); font-size:9px; line-height:1.3; margin-bottom:5px; }
+.market-hero strong { font-size:20px; letter-spacing:-.04em; }
+.market-tabs { margin-bottom:12px; }
+.market-list { display:grid; gap:11px; }
+.market-card { border:1px solid var(--line); border-radius:20px; overflow:hidden; background:linear-gradient(150deg,rgba(255,255,255,.085),rgba(255,255,255,.03)); box-shadow:0 12px 28px rgba(0,0,0,.2); }
+.market-card-main { width:100%; border:0; background:transparent; display:grid; grid-template-columns:82px 1fr; gap:12px; align-items:center; padding:11px; text-align:left; }
+.market-card-main > img,.market-image-placeholder { width:82px; height:112px; object-fit:contain; border-radius:9px; background:#0c1730; }
+.market-card-copy { min-width:0; }
+.market-card-copy > span { color:var(--muted); font-size:9px; }
+.market-card-copy h3 { margin:4px 0 7px; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.market-card-copy strong { display:block; font-size:29px; color:var(--accent); letter-spacing:-.05em; }
+.market-card-copy small { color:var(--muted); font-size:9px; }
+.market-quick-actions { display:grid; grid-template-columns:46px 60px 46px 1fr; gap:7px; padding:0 11px 11px; }
+.market-quick-actions button { min-height:48px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.07); font-size:22px; font-weight:900; }
+.market-quick-actions span { border:1px solid var(--line); border-radius:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.market-quick-actions span b { font-size:17px; }
+.market-quick-actions span small { font-size:8px; color:var(--muted); }
+.market-quick-actions .market-sold-button { background:linear-gradient(135deg,var(--accent),#ffb52d); color:#121a2f; font-size:12px; }
+.market-quick-actions button:disabled { opacity:.38; }
+.trade-ready-row,.sold-summary-row { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-top:1px solid var(--line); font-size:11px; }
+.trade-ready-row button { border:0; border-radius:10px; background:rgba(98,220,164,.15); color:var(--green); padding:8px 12px; }
+.sold-summary-row strong { color:var(--green); }
+.stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin:4px 0 12px; }
+.stats-grid article { min-height:100px; padding:14px; border-radius:18px; border:1px solid var(--line); background:linear-gradient(150deg,rgba(255,255,255,.085),rgba(255,255,255,.03)); display:flex; flex-direction:column; justify-content:space-between; }
+.stats-grid span { color:var(--muted); font-size:9px; line-height:1.35; }
+.stats-grid strong { font-size:20px; letter-spacing:-.04em; }
+.language-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.language-stats div { text-align:center; padding:13px 8px; border-radius:15px; background:rgba(255,255,255,.055); }
+.language-stats span { color:var(--muted); font-size:9px; }
+.language-stats strong { display:block; margin-top:3px; font-size:22px; }
+.top-card-list { display:grid; gap:7px; }
+.top-card-list button { display:grid; grid-template-columns:26px 1fr auto; gap:9px; align-items:center; width:100%; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.045); padding:10px; text-align:left; }
+.top-card-list button > span { width:25px; height:25px; border-radius:50%; display:grid; place-items:center; background:rgba(255,211,78,.14); color:var(--accent); font-weight:900; }
+.top-card-list div { min-width:0; }
+.top-card-list strong,.top-card-list small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.top-card-list small { color:var(--muted); margin-top:2px; font-size:8px; }
+.top-card-list b { font-size:13px; }
+.muted-copy { color:var(--muted); font-size:12px; }
+.commerce-switches { display:grid; gap:8px; margin-bottom:12px; }
+.commerce-switches label { display:flex; gap:11px; align-items:center; padding:11px; border:1px solid var(--line); border-radius:15px; background:rgba(255,255,255,.04); }
+.commerce-switches input { width:22px; height:22px; accent-color:var(--accent); flex:0 0 auto; }
+.commerce-switches span strong,.commerce-switches span small { display:block; }
+.commerce-switches span small { color:var(--muted); font-size:9px; margin-top:2px; }
+.read-only-value { min-height:49px; border:1px solid var(--line); border-radius:16px; background:rgba(255,255,255,.045); display:flex; align-items:center; padding:0 13px; font-size:17px; font-weight:850; }
+.sale-entry-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:10px; padding-top:12px; border-top:1px solid var(--line); }
+.sale-entry-grid .field:nth-child(3),.sale-entry-grid button { grid-column:1/-1; }
+.sales-history { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+.sales-history > div { display:grid; grid-template-columns:1fr auto 36px; gap:8px; align-items:center; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.07); font-size:10px; }
+.sales-history button { width:34px; height:34px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.06); }
+.sales-history > p,.sold-out-note { color:var(--muted); font-size:10px; line-height:1.45; }
+.jp-price-actions { margin-top:11px; }
+.jp-price-actions p { margin:7px 2px 0; color:var(--muted); font-size:9px; line-height:1.4; }
+.manual-price-editor { display:grid; grid-template-columns:1fr auto; gap:7px; margin-top:10px; }
+.manual-price-editor input { min-width:0; height:45px; border:1px solid var(--line); border-radius:13px; color:var(--text); background:rgba(255,255,255,.055); padding:0 11px; }
+.manual-price-editor button { min-height:45px; border:1px solid var(--line); border-radius:13px; background:rgba(255,255,255,.08); padding:0 11px; font-size:10px; font-weight:850; }
+.price-mini-grid.two { grid-template-columns:1fr 1fr; }
+.language-flag.jp { background:rgba(255,83,102,.17); color:#ff9da9; }
+.error-note { color:#ffadb6; }
+.feature-launch-card { background:linear-gradient(140deg,rgba(91,169,255,.11),rgba(255,211,78,.06)); }
+@media (max-width:380px) { .market-card-main { grid-template-columns:70px 1fr; }.market-card-main > img,.market-image-placeholder { width:70px;height:96px; }.market-quick-actions { grid-template-columns:42px 52px 42px 1fr; }.stats-grid strong { font-size:17px; } }
