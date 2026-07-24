@@ -3,14 +3,20 @@
 const API_BASE = 'https://api.tcgdex.net/v2';
 const SECONDARY_IMAGE_API_BASE = 'https://api.pokemontcg.io/v2';
 const SECONDARY_IMAGE_CDN = 'https://images.pokemontcg.io';
-const STORAGE_KEY = 'binderdex-data-v7';
-const LEGACY_STORAGE_KEYS = ['binderdex-data-v6', 'binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
+const STORAGE_KEY = 'binderdex-data-v8';
+const LEGACY_STORAGE_KEYS = ['binderdex-data-v7', 'binderdex-data-v6', 'binderdex-data-v5', 'binderdex-data-v4', 'binderdex-data-v3', 'binderdex-data-v2', 'binderdex-data-v1'];
 const PAGE_SIZE = 9;
-const APP_VERSION = '7.0.0';
+const APP_VERSION = '8.0.0';
 const IMAGE_DB_NAME = 'binderdex-image-store';
 const IMAGE_DB_VERSION = 1;
 const IMAGE_STORE_NAME = 'custom-images';
 const FETCH_TIMEOUT_MS = 12000;
+const IMAGE_PROXY_BASES = ['https://wsrv.nl/', 'https://images.weserv.nl/'];
+const CARDMARKET_IMAGE_HOST = 'product-images.s3.cardmarket.com';
+const POKEMON_DE_JA = window.BINDERDEX_POKEMON_DE_JA || {};
+const POKEMON_DE_JA_ENTRIES = Object.entries(POKEMON_DE_JA)
+  .map(([german, japanese]) => ({ german, japanese, tokens: german.split(' ') }))
+  .sort((a, b) => b.tokens.length - a.tokens.length || b.german.length - a.german.length);
 
 const LANGS = {
   de: { label: 'Deutsch', short: 'DE' },
@@ -56,6 +62,7 @@ const state = {
   searchResults: [],
   searchLoading: false,
   searchError: '',
+  searchTranslation: null,
   wishlistFilter: '',
   attachContext: null,
   binderPage: 0,
@@ -87,7 +94,7 @@ const dragState = {
 
 function defaultData() {
   return {
-    version: 7,
+    version: 8,
     collection: [],
     settings: {
       defaultAddLanguage: 'de',
@@ -188,11 +195,11 @@ function migrateData(input) {
   };
   if (!ADD_LANGS.includes(settings.defaultAddLanguage)) settings.defaultAddLanguage = 'de';
 
-  return { version: 7, collection: migrated, settings };
+  return { version: 8, collection: migrated, settings };
 }
 
 function saveData() {
-  state.data.version = 7;
+  state.data.version = 8;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
 }
 
@@ -366,6 +373,28 @@ function uniqueValues(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function isCardmarketProductImageUrl(value = '') {
+  try {
+    const parsed = new URL(String(value).trim());
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === CARDMARKET_IMAGE_HOST;
+  } catch {
+    return false;
+  }
+}
+
+function proxiedImageUrl(value, quality = 'low') {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  const params = new URLSearchParams({
+    url: source.replace(/^https?:\/\//i, ''),
+    output: 'webp',
+    q: quality === 'high' ? '92' : '86',
+    maxage: '31d',
+  });
+  params.set('w', quality === 'high' ? '1000' : '480');
+  return IMAGE_PROXY_BASES.map((base) => `${base}?${params.toString()}`);
+}
+
 function imageCandidatesForSource(source, quality = 'low') {
   if (!source) return [];
   const value = String(source).trim();
@@ -375,6 +404,13 @@ function imageCandidatesForSource(source, quality = 'low') {
   const clean = value.replace(/[?#].*$/, '');
   let hostname = '';
   try { hostname = new URL(value).hostname.toLowerCase(); } catch { hostname = ''; }
+
+  // Cardmarket schützt seinen S3-Bildserver teilweise vor direktem Hotlinking.
+  // BinderDex probiert deshalb zuerst einen freien Bild-Cache/Proxy und danach
+  // weiterhin die originale, vom Nutzer gespeicherte Adresse.
+  if (hostname === CARDMARKET_IMAGE_HOST) {
+    return uniqueValues([...proxiedImageUrl(value, quality), value]);
+  }
 
   // Die zweite Bildquelle liefert kleine Bilder als /123.png und große Bilder
   // als /123_hires.png. Je nach Ansicht wird die passende Größe zuerst geladen.
@@ -518,7 +554,7 @@ function cardImageHtml(sources, alt, options = {}) {
   const itemId = options.itemId ? ` data-image-item-id="${escapeHtml(options.itemId)}"` : '';
   const language = options.language ? ` data-image-language="${escapeHtml(options.language)}"` : '';
   const searchCardId = options.searchCardId ? ` data-search-image-card-id="${escapeHtml(options.searchCardId)}"` : '';
-  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async" referrerpolicy="no-referrer"${draggable}${itemId}${language}${searchCardId} />`;
+  return `<img${className} src="${escapeHtml(candidates[0])}" data-image-candidates="${escapeHtml(JSON.stringify(candidates.slice(1)))}" alt="${escapeHtml(alt || 'Pokémon-Karte')}" loading="${loading}" fetchpriority="${priority}" decoding="async"${draggable}${itemId}${language}${searchCardId} />`;
 }
 
 function formatDate(value) {
@@ -539,8 +575,49 @@ function normalizeText(value = '') {
     .toLocaleLowerCase('de-DE')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
+}
+
+function translateGermanPokemonSearchName(name = '') {
+  const normalized = normalizeText(name);
+  if (!normalized) return null;
+  const tokens = normalized.split(' ').filter(Boolean);
+
+  for (const entry of POKEMON_DE_JA_ENTRIES) {
+    if (entry.tokens.length > tokens.length) continue;
+    for (let start = 0; start <= tokens.length - entry.tokens.length; start += 1) {
+      const matches = entry.tokens.every((token, offset) => tokens[start + offset] === token);
+      if (!matches) continue;
+      const qualifierTokens = tokens.filter((_, index) => index < start || index >= start + entry.tokens.length);
+      return {
+        german: entry.german,
+        japanese: entry.japanese,
+        qualifier: qualifierTokens.join(' '),
+      };
+    }
+  }
+  return null;
+}
+
+function japaneseSearchBridge(parsed) {
+  const translation = translateGermanPokemonSearchName(parsed?.name || '');
+  if (!translation) return { parsed, translation: null };
+
+  // Deutsche Setkürzel und Kartennummern bezeichnen in der Regel eine andere
+  // internationale Druckausgabe. Für die Japanisch-Suche werden sie daher
+  // nicht fälschlich als japanische Set-/Kartennummer erzwungen.
+  const translated = {
+    ...parsed,
+    name: translation.japanese,
+    setId: '',
+    setToken: '',
+    localId: '',
+    translatedFromGerman: true,
+    translatedGermanName: translation.german,
+    nameQualifier: translation.qualifier,
+  };
+  return { parsed: translated, translation };
 }
 
 function normalizeNumber(value = '') {
@@ -938,7 +1015,7 @@ function renderSearch() {
     </section>
 
     <div class="segmented ${availableLanguages.length === 1 ? 'single' : ''}" aria-label="Kartensprache">
-      ${availableLanguages.map((code) => `<button data-search-lang="${code}" class="${state.searchLang === code ? 'active' : ''}">${LANGS[code].label}${attach ? ' (Vergleich)' : ''}</button>`).join('')}
+      ${availableLanguages.map((code) => `<button data-search-lang="${code}" class="${state.searchLang === code ? 'active' : ''}" aria-pressed="${state.searchLang === code ? 'true' : 'false'}">${LANGS[code].label}${attach ? ' (Vergleich)' : ''}</button>`).join('')}
     </div>
 
     <div class="toolbar search-toolbar">
@@ -957,7 +1034,7 @@ function renderSearch() {
 
     <div class="api-note">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
-      <span>Setkürzel werden bestmöglich zugeordnet. Der Cardmarket-Link wird automatisch als präzise Suche angelegt und kann später jederzeit manuell ersetzt werden.</span>
+      <span id="searchLanguageNote">${searchLanguageNoteHtml()}</span>
     </div>
 
     <section id="searchResults">${searchResultsHtml()}</section>
@@ -977,11 +1054,37 @@ function updateSearchResults() {
   if (container) container.innerHTML = searchResultsHtml();
 }
 
+function searchLanguageNoteHtml() {
+  if (state.searchLang === 'ja') {
+    if (state.searchTranslation) {
+      return `Japanisch aktiv: „${escapeHtml(state.searchTranslation.german)}“ wird als „${escapeHtml(state.searchTranslation.japanese)}“ gesucht. Angezeigt werden ausschließlich japanische Karten.`;
+    }
+    return 'Japanisch aktiv: Du kannst deutsche Pokémon-Namen eingeben. BinderDex übersetzt sie lokal und zeigt ausschließlich japanische Karten.';
+  }
+  return 'Deutsch aktiv: Setkürzel werden bestmöglich zugeordnet. Cardmarket-Links können später jederzeit manuell ersetzt werden.';
+}
+
+function updateSearchLanguageUi() {
+  main.querySelectorAll('[data-search-lang]').forEach((button) => {
+    const active = button.dataset.searchLang === state.searchLang;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  const note = document.getElementById('searchLanguageNote');
+  if (note) note.innerHTML = searchLanguageNoteHtml();
+  const input = document.getElementById('cardSearchInput');
+  if (input) input.placeholder = state.searchLang === 'ja'
+    ? 'Deutscher Pokémon-Name · japanische Nummer/Set-ID'
+    : 'Name · Nummer · Setkürzel · Reihenfolge egal';
+}
+
 function searchResultsHtml() {
   if (state.searchLoading) return '<div class="loading"><div><div class="spinner"></div>Suche läuft …</div></div>';
   if (state.searchError) return `<section class="empty-state small"><h2>Suche nicht erreichbar</h2><p>${escapeHtml(state.searchError)}</p></section>`;
-  if (!state.searchQuery.trim()) return '<section class="search-start"><div class="search-symbol">⌕</div><h2>Name, Nummer oder Set eingeben</h2><p>Beispiele: „OBF 199 Glurak“, „199 OBF Glurak“ oder „OBF199“. Die Reihenfolge ist egal.</p></section>';
-  if (!state.searchResults.length) return '<section class="empty-state small"><h2>Keine Karte gefunden</h2><p>Probiere Name, Nummer und Setkürzel in beliebiger Reihenfolge – zum Beispiel „199 OBF Glurak“.</p></section>';
+  if (!state.searchQuery.trim()) return state.searchLang === 'ja'
+    ? '<section class="search-start"><div class="search-symbol">⌕</div><h2>Deutschen Pokémon-Namen eingeben</h2><p>Beispiele: „Glurak“, „Pikachu ex“ oder „Nachtara“. BinderDex zeigt ausschließlich japanische Karten.</p></section>'
+    : '<section class="search-start"><div class="search-symbol">⌕</div><h2>Name, Nummer oder Set eingeben</h2><p>Beispiele: „OBF 199 Glurak“, „199 OBF Glurak“ oder „OBF199“. Die Reihenfolge ist egal.</p></section>';
+  if (!state.searchResults.length) return `<section class="empty-state small"><h2>Keine Karte gefunden</h2><p>${state.searchLang === 'ja' ? 'Gib einen deutschen Pokémon-Namen ein, zum Beispiel „Glurak“, „Pikachu ex“ oder „Nachtara“. Es werden nur japanische Ausgaben angezeigt.' : 'Probiere Name, Nummer und Setkürzel in beliebiger Reihenfolge – zum Beispiel „199 OBF Glurak“.'}</p></section>`;
 
   return `<div class="results-list">${state.searchResults.map((card) => `
     <button class="result-card" data-search-result="${escapeHtml(card.id)}">
@@ -1159,6 +1262,11 @@ function cardSearchScore(card, parsed) {
     else if (cardName.includes(queryName)) score += 40;
     else return -1000;
   }
+  if (parsed.nameQualifier) {
+    const qualifier = normalizeText(parsed.nameQualifier);
+    if (qualifier && cardName.includes(qualifier)) score += 24;
+    else if (qualifier) score -= 8;
+  }
   if (requestedLocal) {
     if (local === requestedLocal) score += 60;
     else return -1000;
@@ -1286,6 +1394,8 @@ async function performSearch(query) {
 
   if (clean.length < 2) {
     state.searchResults = [];
+    state.searchTranslation = null;
+    updateSearchLanguageUi();
     state.searchLoading = false;
     updateSearchResults();
     return;
@@ -1294,8 +1404,13 @@ async function performSearch(query) {
   state.searchLoading = true;
   updateSearchResults();
   try {
-    const parsed = parseCardSearch(clean);
-    const results = await searchCards(parsed, state.searchLang);
+    const originalParsed = parseCardSearch(clean);
+    const bridge = state.searchLang === 'ja'
+      ? japaneseSearchBridge(originalParsed)
+      : { parsed: originalParsed, translation: null };
+    state.searchTranslation = bridge.translation;
+    updateSearchLanguageUi();
+    const results = await searchCards(bridge.parsed, state.searchLang);
     if (requestId !== searchRequestId) return;
     state.searchResults = results;
   } catch (error) {
@@ -1676,7 +1791,7 @@ function normalizeCustomImageUrl(value) {
   return parsed.href;
 }
 
-function testCustomImageUrl(url, timeoutMs = 12000) {
+function testSingleImageUrl(url, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     let settled = false;
@@ -1687,10 +1802,9 @@ function testCustomImageUrl(url, timeoutMs = 12000) {
       image.onload = null;
       image.onerror = null;
       if (error) reject(error);
-      else resolve(true);
+      else resolve(url);
     };
-    const timer = setTimeout(() => finish(new Error('Das Bild lädt zu lange. Prüfe den Link.')), timeoutMs);
-    image.referrerPolicy = 'no-referrer';
+    const timer = setTimeout(() => finish(new Error('Das Bild lädt zu lange.')), timeoutMs);
     image.onload = () => {
       if (image.naturalWidth < 40 || image.naturalHeight < 40) {
         finish(new Error('Der Link enthält kein brauchbares Kartenbild.'));
@@ -1698,9 +1812,22 @@ function testCustomImageUrl(url, timeoutMs = 12000) {
       }
       finish();
     };
-    image.onerror = () => finish(new Error('Der Link konnte nicht als Bild geladen werden. Verwende einen direkten Bild-Link.'));
+    image.onerror = () => finish(new Error('Bild konnte nicht geladen werden.'));
     image.src = url;
   });
+}
+
+async function testCustomImageUrl(url, timeoutMs = 12000) {
+  const candidates = imageCandidatesForSource(url, 'high');
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      return await testSingleImageUrl(candidate, timeoutMs);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('Der Link konnte nicht als Bild geladen werden.');
 }
 
 async function saveCustomImageUrl() {
@@ -1729,6 +1856,17 @@ async function saveCustomImageUrl() {
     toast('Bild-Link wurde gespeichert und wird jetzt verwendet.');
   } catch (error) {
     console.error(error);
+    if (isCardmarketProductImageUrl(url)) {
+      // Cardmarket kann den Browser-Test trotz gültiger Bildadresse blockieren.
+      // Der Link wird trotzdem gespeichert und beim Anzeigen über den Proxy
+      // sowie anschließend direkt versucht.
+      variant.customImageUrl = url;
+      variant.customImageUrlUpdatedAt = new Date().toISOString();
+      saveData();
+      renderDetail();
+      toast('Cardmarket-Bildlink gespeichert. BinderDex lädt ihn über den Bild-Proxy.');
+      return;
+    }
     toast(error.message || 'Bild-Link konnte nicht geladen werden.');
   }
 }
@@ -1928,7 +2066,7 @@ function renderDetail() {
         <button class="primary-button" data-save-custom-image-url>Link testen & speichern</button>
       </div>
       ${hasCustomImageUrl ? '<button class="image-link-remove" data-remove-custom-image-url>Gespeicherten Bild-Link entfernen</button>' : ''}
-      <p class="image-link-help">Verwende einen direkten HTTPS-Bild-Link. Links zu normalen Webseiten können nicht als Kartenbild angezeigt werden. Wenn der Link später ausfällt, probiert BinderDex automatisch die übrigen Bildquellen.</p>
+      <p class="image-link-help">Verwende einen direkten HTTPS-Bild-Link. Cardmarket-S3-Bilder werden automatisch über einen kompatiblen Bild-Proxy geladen. Gespeichert bleibt immer deine originale Adresse. Wenn der Link später ausfällt, probiert BinderDex die übrigen Bildquellen.</p>
     </section>
 
     <section class="panel">
@@ -2039,8 +2177,8 @@ function renderSettings() {
     <section class="search-intro"><h2>Deine App</h2><p>Standardsprache, Datensicherung und Hinweise zur Bedienung.</p></section>
     <div class="settings-list">
       <section class="settings-card version-card">
-        <div><h3>BinderDex ${APP_VERSION}</h3><p>Automatische Ersatzbilder, eigene Kartenfotos und frei speicherbare Bild-Links pro Karte.</p></div>
-        <span class="version-badge">V7</span>
+        <div><h3>BinderDex ${APP_VERSION}</h3><p>Cardmarket-Bildproxy, deutsche Namenssuche für japanische Karten und klarer Sprachwechsel.</p></div>
+        <span class="version-badge">V8</span>
       </section>
       <section class="settings-card">
         <h3>Standardsprache beim Hinzufügen</h3>
@@ -2521,8 +2659,10 @@ main.addEventListener('click', (event) => {
   const searchLang = target.closest('[data-search-lang]');
   if (searchLang) {
     state.searchLang = searchLang.dataset.searchLang;
+    state.searchTranslation = null;
     state.searchResults = [];
     state.searchError = '';
+    updateSearchLanguageUi();
     updateSearchResults();
     if (state.searchQuery.trim().length >= 2) performSearch(state.searchQuery);
     return;
@@ -2543,6 +2683,8 @@ main.addEventListener('click', (event) => {
     state.searchQuery = '';
     state.searchResults = [];
     state.searchError = '';
+    state.searchTranslation = null;
+    updateSearchLanguageUi();
     const input = document.getElementById('cardSearchInput');
     if (input) {
       input.value = '';

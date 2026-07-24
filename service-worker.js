@@ -1,12 +1,13 @@
-const CACHE_VERSION = 'binderdex-v7.0.0';
+const CACHE_VERSION = 'binderdex-v8.0.0';
 const APP_CACHE = `${CACHE_VERSION}-app`;
 const API_CACHE = `${CACHE_VERSION}-api`;
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=7.0.0',
-  './app.js?v=7.0.0',
-  './manifest.json?v=7.0.0',
+  './styles.css?v=8.0.0',
+  './pokemon-names.js?v=8.0.0',
+  './app.js?v=8.0.0',
+  './manifest.json?v=8.0.0',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -47,7 +48,7 @@ self.addEventListener('fetch', (event) => {
 
   // Beide Kartenbild-CDNs werden direkt von Safari geladen. So greifen der
   // native Bildcache und die automatischen URL-Fallbacks ohne PWA-Proxy.
-  if (url.hostname === 'assets.tcgdex.net' || url.hostname === 'images.pokemontcg.io') return;
+  if (url.hostname === 'assets.tcgdex.net' || url.hostname === 'images.pokemontcg.io' || url.hostname === 'wsrv.nl' || url.hostname === 'images.weserv.nl' || url.hostname === 'product-images.s3.cardmarket.com') return;
 
   if (url.origin === self.location.origin) {
     if (request.mode === 'navigate') {

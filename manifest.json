@@ -1,9 +1,9 @@
 {
   "name": "BinderDex – Kartenbinder",
   "short_name": "BinderDex",
-  "description": "Privater 3×3-Kartenbinder mit Wunschliste, Marktpreisen und Kartenbildern aus mehreren Quellen und eigenen Bild-Links.",
+  "description": "Privater Pokémon-Kartenbinder mit deutscher Suche für japanische Karten und eigenen Bild-Links.",
   "lang": "de-DE",
-  "start_url": "./?v=7.0.0",
+  "start_url": "./?v=8.0.0",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",

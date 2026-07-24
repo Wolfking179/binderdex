@@ -263,7 +263,12 @@ img { display: block; max-width: 100%; }
 .segmented { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; padding: 5px; border-radius: 17px; background: rgba(255,255,255,.055); border: 1px solid var(--line); margin: 7px 0 13px; }
 .segmented.single { grid-template-columns: 1fr; }
 .segmented button { border: 0; min-height: 42px; border-radius: 13px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 850; cursor: pointer; }
-.segmented button.active { background: rgba(255,255,255,.11); color: var(--text); box-shadow: 0 4px 12px rgba(0,0,0,.16); }
+.segmented button.active { color: #fff; box-shadow: 0 5px 15px rgba(0,0,0,.24), inset 0 0 0 1px rgba(255,255,255,.2); transform: translateY(-1px); }
+.segmented button[data-search-lang="de"].active { background: linear-gradient(135deg, #1764d9, #39a4ff); }
+.segmented button[data-search-lang="ja"].active { background: linear-gradient(135deg, #d5263f, #ff6477); }
+.segmented button[data-search-lang="en"].active { background: linear-gradient(135deg, #5b44d6, #8b78ff); }
+.segmented button[aria-pressed="false"] { opacity: .78; }
+.segmented button { transition: background .18s ease, color .18s ease, transform .18s ease, opacity .18s ease; }
 .search-toolbar { margin-bottom: 9px; }
 .search-examples { display: flex; gap: 6px; overflow-x: auto; padding: 0 1px 10px; scrollbar-width: none; }
 .search-examples::-webkit-scrollbar { display: none; }
@@ -526,3 +531,6 @@ img.image-failed { object-fit: contain !important; background: rgba(255,255,255,
   .custom-image-link-editor { grid-template-columns: 1fr; }
   .custom-image-link-editor .primary-button { width: 100%; font-size: 11px; }
 }
+
+/* V8: der aktive Sprachreiter muss auf dem iPhone sofort eindeutig erkennbar sein. */
+.api-note #searchLanguageNote { display: block; }
